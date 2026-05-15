@@ -6498,47 +6498,38 @@ class HermesCLI:
         print(f"  {remaining} message(s) remaining in history.")
     
     def _run_curses_picker(self, title: str, items: list[str], default_index: int = 0) -> int | None:
-        """Run curses_single_select via run_in_terminal so prompt_toolkit handles terminal ownership cleanly."""
-        import threading
+        """Run curses_single_select.  ``run_in_terminal`` returns a coroutine
+        that is never awaited, so the scheduled function never executes and
+        the caller gets ``None``.  Always call directly: ``patch_stdout()``
+        (active during ``app.run()``) handles terminal ownership.
+        """
         from hermes_cli.curses_ui import curses_single_select
 
-        result = [None]
-
-        def _pick():
-            result[0] = curses_single_select(title, items, default_index=default_index)
-
-        # run_in_terminal requires an asyncio event loop — only exists in the
-        # main prompt_toolkit thread.  If we're in a background thread (e.g.
-        # process_loop), fall back to direct curses call.
-        in_main_thread = threading.current_thread() is threading.main_thread()
-
-        if self._app and in_main_thread:
-            from prompt_toolkit.application import run_in_terminal
+        try:
             was_visible = self._status_bar_visible
             self._status_bar_visible = False
-            self._app.invalidate()
-            try:
-                run_in_terminal(_pick)
-            finally:
-                self._status_bar_visible = was_visible
+            if self._app:
                 self._app.invalidate()
-        else:
-            _pick()
-
-        return result[0]
+            return curses_single_select(title, items, default_index=default_index)
+        finally:
+            self._status_bar_visible = was_visible
+            if self._app:
+                self._app.invalidate()
 
     def _prompt_text_input(self, prompt_text: str) -> str | None:
         """Prompt for free-text input safely inside or outside prompt_toolkit.
 
-        Mirrors the thread-aware guard in ``_run_curses_picker``: ``run_in_terminal``
-        returns a coroutine that must be awaited by the prompt_toolkit event loop,
-        which only exists on the main thread.  Slash commands are dispatched from
-        the ``process_loop`` daemon thread (see issue #23185), so calling
-        ``run_in_terminal`` from there orphans the coroutine — ``_ask`` never runs,
-        and user keystrokes leak into the composer instead.  Fall back to a direct
-        ``input()`` when we're off the main thread.
+        ``run_in_terminal`` (prompt_toolkit 3.x) returns a coroutine that must
+        be awaited by the event loop.  When called from a background thread
+        (``process_loop``) the coroutine is orphaned — ``_ask`` never runs and
+        ``result[0]`` stays ``None``.  Even on the main thread during
+        ``app.run()``, the coroutine is fire-and-forget; the caller returns
+        ``result[0]`` before the loop has a chance to execute it.
+
+        The reliable path is always direct ``input()``: ``patch_stdout()``
+        (active during ``app.run()``) already handles hiding/redrawing the
+        prompt around synchronous prints and reads.
         """
-        import threading
         result = [None]
 
         def _ask():
@@ -6547,28 +6538,7 @@ class HermesCLI:
             except (KeyboardInterrupt, EOFError):
                 pass
 
-        in_main_thread = threading.current_thread() is threading.main_thread()
-
-        if self._app and in_main_thread:
-            from prompt_toolkit.application import run_in_terminal
-            was_visible = self._status_bar_visible
-            self._status_bar_visible = False
-            self._app.invalidate()
-            try:
-                run_in_terminal(_ask)
-            except Exception:
-                # WSL / Warp / certain terminal emulators silently drop the
-                # scheduled coroutine.  Fall back to a direct input() so the
-                # user's keystrokes don't leak into the agent buffer.
-                try:
-                    _ask()
-                except Exception:
-                    pass
-            finally:
-                self._status_bar_visible = was_visible
-                self._app.invalidate()
-        else:
-            _ask()
+        _ask()
         return result[0]
 
     def _prompt_text_input_modal(
