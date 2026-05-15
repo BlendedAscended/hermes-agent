@@ -130,7 +130,9 @@ DEFAULT_FALLBACK_CONTEXT = CONTEXT_PROBE_TIERS[0]
 # Minimum context length required to run Hermes Agent.  Models with fewer
 # tokens cannot maintain enough working memory for tool-calling workflows.
 # Sessions, model switches, and cron jobs should reject models below this.
-MINIMUM_CONTEXT_LENGTH = 64_000
+# Reduced from 64K to 32K to support lower-tier models (qwen2.5:3b at 32K,
+# qwen3:14b at 40K) with aggressive adaptive compression thresholds.
+MINIMUM_CONTEXT_LENGTH = 32_000
 
 # Thin fallback defaults — only broad model family patterns.
 # These fire only when provider is unknown AND models.dev/OpenRouter/Anthropic
@@ -244,6 +246,17 @@ DEFAULT_CONTEXT_LENGTHS = {
     "mimo-v2-omni": 262144,
     "mimo-v2-flash": 262144,
     "zai-org/GLM-5": 202752,
+    # MiniMax M2 series — all 204,800 context
+    # Source: https://platform.minimax.io/docs/api-reference/text-anthropic-api
+    "minimax-m2.7": 204800,
+    "minimax-m2.5": 204800,
+    # GLM-5 series — all inherit GLM family context (202,752)
+    # zai-org/GLM-5 covers the base; explicit entries ensure no substring collision.
+    "glm-5.1": 202752,
+    # Qwen 3.5 / 3.6 plus variants (not the "coder" sub-family)
+    # These sit between qwen3-coder (262K) and qwen3-coder-plus (1M).
+    "qwen3.5-plus": 262144,
+    "qwen3.6-plus": 262144,
 }
 
 # xAI Grok models that ACCEPT the `reasoning.effort` parameter on

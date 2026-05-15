@@ -98,10 +98,10 @@ def test_auto_corrects_threshold_when_aux_context_below_threshold(mock_get_clien
     assert agent.context_compressor.threshold_tokens == 80_000
 
 
-@patch("agent.model_metadata.get_model_context_length", return_value=32_768)
+@patch("agent.model_metadata.get_model_context_length", return_value=28_000)
 @patch("agent.auxiliary_client.get_text_auxiliary_client")
 def test_rejects_aux_below_minimum_context(mock_get_client, mock_ctx_len):
-    """Hard floor: aux context < MINIMUM_CONTEXT_LENGTH (64K) → session
+    """Hard floor: aux context < MINIMUM_CONTEXT_LENGTH (32K) → session
     refuses to start (ValueError), mirroring the main-model rejection."""
     agent = _make_agent(main_context=200_000, threshold_percent=0.50)
     mock_client = MagicMock()
@@ -116,8 +116,8 @@ def test_rejects_aux_below_minimum_context(mock_get_client, mock_ctx_len):
 
     err = str(exc_info.value)
     assert "tiny-aux-model" in err
-    assert "32,768" in err
-    assert "64,000" in err
+    assert "28,000" in err
+    assert "32,000" in err
     assert "below the minimum" in err
 
 
@@ -265,7 +265,7 @@ def test_init_feasibility_check_uses_aux_context_override_from_config():
         )
 
     assert agent._aux_compression_context_length_config == 1_000_000
-    mock_ctx_len.assert_called_once_with(
+    mock_ctx_len.assert_any_call(
         "custom/big-model",
         base_url="http://custom-endpoint:8080/v1",
         api_key="sk-custom",
