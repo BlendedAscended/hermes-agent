@@ -2099,19 +2099,12 @@ class AIAgent:
         self._api_max_retries = _api_retries
 
         # Initialize context compressor for automatic context management
-        # Compresses conversation when approaching model's context limit
-        # Configuration via config.yaml (compression section)
+        # Compression threshold is auto-resolved by ContextCompressor using:
+        #   config override > per-model override > adaptive tier > fallback
+        # No need to compute threshold here — the compressor owns its own policy.
         _compression_cfg = _agent_cfg.get("compression", {})
         if not isinstance(_compression_cfg, dict):
             _compression_cfg = {}
-        compression_threshold = float(_compression_cfg.get("threshold", 0.50))
-        try:
-            from agent.auxiliary_client import _compression_threshold_for_model as _cthresh_fn
-            _model_cthresh = _cthresh_fn(self.model)
-            if _model_cthresh is not None:
-                compression_threshold = _model_cthresh
-        except Exception:
-            pass
         compression_enabled = str(_compression_cfg.get("enabled", True)).lower() in {"true", "1", "yes"}
         compression_target_ratio = float(_compression_cfg.get("target_ratio", 0.20))
         compression_protect_last = int(_compression_cfg.get("protect_last_n", 20))
@@ -2327,7 +2320,7 @@ class AIAgent:
         else:
             self.context_compressor = ContextCompressor(
                 model=self.model,
-                threshold_percent=compression_threshold,
+                threshold_percent=_compression_cfg.get("threshold"),
                 protect_first_n=compression_protect_first,
                 protect_last_n=compression_protect_last,
                 summary_target_ratio=compression_target_ratio,
@@ -2342,8 +2335,10 @@ class AIAgent:
         self.compression_enabled = compression_enabled
 
         # Reject models whose context window is below the minimum required
-        # for reliable tool-calling workflows (64K tokens).
+        # for reliable tool-calling workflows (32K tokens, down from 64K).
+        # Models between 32K–64K are allowed but warned about.
         from agent.model_metadata import MINIMUM_CONTEXT_LENGTH
+        _LOW_CONTEXT_WARN_THRESHOLD = 64_000
         _ctx = getattr(self.context_compressor, "context_length", 0)
         if _ctx and _ctx < MINIMUM_CONTEXT_LENGTH:
             raise ValueError(
@@ -2352,6 +2347,12 @@ class AIAgent:
                 f"by Hermes Agent.  Choose a model with at least "
                 f"{MINIMUM_CONTEXT_LENGTH // 1000}K context, or set "
                 f"model.context_length in config.yaml to override."
+            )
+        if _ctx and _ctx < _LOW_CONTEXT_WARN_THRESHOLD:
+            self._emit_status(
+                f"⚠ Model {self.model} has {_ctx:,} token context "
+                f"(below recommended 64K).  Aggressive compression "
+                f"will trigger early to stay within limits."
             )
 
         # Inject context engine tool schemas (e.g. lcm_grep, lcm_describe, lcm_expand).
@@ -2458,7 +2459,7 @@ class AIAgent:
 
         if not self.quiet_mode:
             if compression_enabled:
-                print(f"📊 Context limit: {self.context_compressor.context_length:,} tokens (compress at {int(compression_threshold*100)}% = {self.context_compressor.threshold_tokens:,})")
+                print(f"📊 Context limit: {self.context_compressor.context_length:,} tokens (compress at {int(self.context_compressor.threshold_percent*100)}% = {self.context_compressor.threshold_tokens:,})")
             else:
                 print(f"📊 Context limit: {self.context_compressor.context_length:,} tokens (auto-compression disabled)")
 
@@ -3254,7 +3255,7 @@ class AIAgent:
             )
 
             # Hard floor: the auxiliary compression model must have at least
-            # MINIMUM_CONTEXT_LENGTH (64K) tokens of context.  The main model
+            # MINIMUM_CONTEXT_LENGTH (32K) tokens of context.  The main model
             # is already required to meet this floor (checked earlier in
             # __init__), so the compression model must too — otherwise it
             # cannot summarise a full threshold-sized window of main-model
@@ -3276,7 +3277,7 @@ class AIAgent:
                 # Auto-correct: lower the live session threshold so
                 # compression actually works this session.  The hard floor
                 # above guarantees aux_context >= MINIMUM_CONTEXT_LENGTH,
-                # so the new threshold is always >= 64K.
+                # so the new threshold is always >= 32K.
                 #
                 # The compression summariser sends a single user-role
                 # prompt (no system prompt, no tools) to the aux model, so

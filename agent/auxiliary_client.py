@@ -224,19 +224,11 @@ def _fixed_temperature_for_model(
     return None
 
 
-def _compression_threshold_for_model(model: Optional[str]) -> Optional[float]:
-    """Return a context-compression threshold override for specific models.
+# NOTE: Compression threshold policy has moved to context_compressor.py.
+# _compression_threshold_for_model, _compression_threshold_for_context_length,
+# and resolve_compression_threshold now live there as the single source of truth.
+# Import them from agent.context_compressor if needed.
 
-    The threshold is the fraction of the model's context window that must be
-    consumed before Hermes triggers summarization.  Higher values delay
-    compression and preserve more raw context.
-
-    Returns a float in (0, 1] to override the global ``compression.threshold``
-    config value, or ``None`` to leave the user's config value unchanged.
-    """
-    if _is_arcee_trinity_thinking(model):
-        return 0.75
-    return None
 
 # Default auxiliary models for direct API-key providers (cheap/fast for side tasks)
 def _get_aux_model_for_provider(provider_id: str) -> str:

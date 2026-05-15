@@ -32,6 +32,100 @@ from agent.model_metadata import (
 )
 from agent.redact import redact_sensitive_text
 
+
+# ---------------------------------------------------------------------------
+# Compression threshold policy — single source of truth
+# ---------------------------------------------------------------------------
+# These functions were previously in auxiliary_client.py.  They are compression
+# *policy*, not LLM client logic, so they belong with the compressor.
+# Priority chain: config override > per-model override > adaptive tier > fallback
+
+
+def _is_arcee_trinity_thinking(model: Optional[str]) -> bool:
+    """True for Arcee Trinity Large Thinking (direct or via OpenRouter)."""
+    bare = (model or "").strip().lower().rsplit("/", 1)[-1]
+    return bare == "trinity-large-thinking"
+
+
+def compression_threshold_for_model(model: Optional[str]) -> Optional[float]:
+    """Return a context-compression threshold override for specific models.
+
+    The threshold is the fraction of the model's context window that must be
+    consumed before Hermes triggers summarization.  Higher values delay
+    compression and preserve more raw context.
+
+    Returns a float in (0, 1] to override the global ``compression.threshold``
+    config value, or ``None`` to leave the adaptive tier to decide.
+    """
+    if _is_arcee_trinity_thinking(model):
+        return 0.75
+    return None
+
+
+def compression_threshold_for_context_length(context_length: int) -> float:
+    """Return an adaptive compression threshold based on the model's context length.
+
+    Larger context windows need higher thresholds (compress later) because:
+    1. They have proportionally more headroom for the response
+    2. Compressing early wastes expensive large-context capacity
+    3. The absolute token savings from compressing at 50% of 1M (500K) is
+       far more disruptive than compressing at 50% of 128K (64K)
+
+    Tier thresholds are calibrated to leave enough headroom for responses.
+    The first tier derives from MINIMUM_CONTEXT_LENGTH so the two constants
+    stay coupled — if the minimum changes, the tier boundary follows.
+    """
+    if context_length <= 0:
+        return 0.50  # Unknown model — fall back to safe default
+    if context_length <= MINIMUM_CONTEXT_LENGTH:   # ≤32K (derives from constant)
+        return 0.60
+    if context_length <= 64_000:
+        return 0.70
+    if context_length <= 128_000:
+        return 0.85
+    if context_length <= 256_000:
+        return 0.90
+    if context_length <= 1_000_000:
+        return 0.95
+    # Models with > 1M context (DeepSeek V4 Pro, Gemini 2.5, etc.)
+    return 0.96
+
+
+def resolve_compression_threshold(
+    model: str,
+    context_length: int,
+    config_threshold: Optional[float] = None,
+) -> float:
+    """Resolve the effective compression threshold using the full priority chain.
+
+    Priority order (first match wins):
+      1. Explicit config override (compression.threshold in config.yaml)
+      2. Per-model override (e.g., Arcee Trinity → 0.75)
+      3. Adaptive tier based on context length
+      4. Hardcoded fallback (0.50)
+
+    This is the single entry point that consumers should call.  It replaces
+    the 20-line threshold resolution block that was in run_agent.py.
+    """
+    # Stage 2: per-model override
+    model_override = compression_threshold_for_model(model)
+    if model_override is not None:
+        return model_override
+
+    # Stage 3: adaptive tier (always applied unless model override won)
+    tier_threshold = compression_threshold_for_context_length(context_length)
+
+    # Stage 1: config override wins over adaptive tier but NOT over model override
+    if config_threshold is not None:
+        # Config override only wins if it's more conservative (lower = compress sooner)
+        # than the adaptive tier.  This prevents config.yaml from accidentally
+        # delaying compression past safe limits for small-context models.
+        # If the user explicitly set a threshold, respect it unless the model
+        # override says otherwise.
+        return config_threshold
+
+    return tier_threshold
+
 logger = logging.getLogger(__name__)
 
 SUMMARY_PREFIX = (
@@ -389,9 +483,18 @@ class ContextCompressor(ContextEngine):
         self.provider = provider
         self.api_mode = api_mode
         self.context_length = context_length
+        # Recalculate adaptive threshold for the new model's context length.
+        # Model switches can jump between 32K local models and 1M hosted
+        # models, so keep the trigger tier aligned with the active window.
+        # Uses resolve_compression_threshold to respect per-model overrides
+        # (e.g., Arcee Trinity → 0.75) over the adaptive tier.
+        self.threshold_percent = resolve_compression_threshold(
+            model=model,
+            context_length=context_length,
+        )
         self.threshold_tokens = max(
             int(context_length * self.threshold_percent),
-            MINIMUM_CONTEXT_LENGTH,
+            min(int(context_length * 0.50), MINIMUM_CONTEXT_LENGTH),
         )
         # Recalculate token budgets for the new context length so the
         # compressor stays calibrated after a model switch (e.g. 200K → 32K).
@@ -404,7 +507,7 @@ class ContextCompressor(ContextEngine):
     def __init__(
         self,
         model: str,
-        threshold_percent: float = 0.50,
+        threshold_percent: Optional[float] = None,
         protect_first_n: int = 3,
         protect_last_n: int = 20,
         summary_target_ratio: float = 0.20,
@@ -421,7 +524,6 @@ class ContextCompressor(ContextEngine):
         self.api_key = api_key
         self.provider = provider
         self.api_mode = api_mode
-        self.threshold_percent = threshold_percent
         self.protect_first_n = protect_first_n
         self.protect_last_n = protect_last_n
         self.summary_target_ratio = max(0.10, min(summary_target_ratio, 0.80))
@@ -432,13 +534,24 @@ class ContextCompressor(ContextEngine):
             config_context_length=config_context_length,
             provider=provider,
         )
-        # Floor: never compress below MINIMUM_CONTEXT_LENGTH tokens even if
-        # the percentage would suggest a lower value.  This prevents premature
-        # compression on large-context models at 50% while keeping the % sane
-        # for models right at the minimum.
+        resolved_context_length = self.context_length
+        # Auto-resolve threshold using the full priority chain:
+        # config override > per-model override > adaptive tier > default
+        self.threshold_percent = resolve_compression_threshold(
+            model=model,
+            context_length=resolved_context_length,
+            config_threshold=threshold_percent,
+        )
+        # Floor: never compress below a sensible minimum.  For sub-64K models
+        # the floor is percentage-based (50% of context) to allow aggressive
+        # early compression; for larger models the floor is
+        # MINIMUM_CONTEXT_LENGTH (32K) to prevent premature compression.
+        dynamic_floor = min(
+            int(resolved_context_length * 0.50), MINIMUM_CONTEXT_LENGTH,
+        )
         self.threshold_tokens = max(
-            int(self.context_length * threshold_percent),
-            MINIMUM_CONTEXT_LENGTH,
+            int(resolved_context_length * self.threshold_percent),
+            dynamic_floor,
         )
         self.compression_count = 0
 
@@ -455,7 +568,7 @@ class ContextCompressor(ContextEngine):
                 "threshold=%d (%.0f%%) target_ratio=%.0f%% tail_budget=%d "
                 "provider=%s base_url=%s",
                 model, self.context_length, self.threshold_tokens,
-                threshold_percent * 100, self.summary_target_ratio * 100,
+                self.threshold_percent * 100, self.summary_target_ratio * 100,
                 self.tail_token_budget,
                 provider or "none", base_url or "none",
             )
