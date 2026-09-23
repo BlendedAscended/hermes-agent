@@ -244,6 +244,26 @@ class ModelCapabilities(Result):
     can_disable_reasoning: bool | None = None
 
 
+class ModelUsageRoute(Result):
+    """One billing base URL's share of a row's lifetime usage for one model id
+    (``hermes_cli/model_usage.py::_row_usage``). Route identity is (provider, base URL), so the same
+    model id on two endpoints arrives as two entries instead of one merged number."""
+
+    base_url: str = ""
+    api_call_count: int = 0
+    last_used_at: float | None = None
+
+
+class ModelUsage(Result):
+    """Lifetime main-loop usage for one model id on one provider row (``task = ''`` only, auxiliary
+    calls excluded). ``api_call_count`` is the sum over the row's routes and ``last_used_at`` the max
+    ``last_seen`` in unix seconds (``None`` when unknown); ``routes`` keeps the base-URL breakdown."""
+
+    api_call_count: int = 0
+    last_used_at: float | None = None
+    routes: list[ModelUsageRoute] = Field(default_factory=list)
+
+
 class ModelOptionProvider(OpenModel):
     """One ``hermes_cli/inventory.py::build_models_payload`` provider row (the union of every field
     the builder sets; ``pricing_pending`` / ``free_tier_pending`` mark the cached-only path)."""
@@ -269,6 +289,7 @@ class ModelOptionProvider(OpenModel):
     free_tier_pending: bool | None = None
     free_tier_row: bool | None = None
     unavailable_models: list[str] | None = None
+    usage: dict[str, ModelUsage] | None = None
 
 
 class ModelOptionsResult(Result):

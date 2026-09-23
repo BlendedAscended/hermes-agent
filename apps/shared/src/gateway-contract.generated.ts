@@ -733,6 +733,7 @@ export interface ModelOptionProvider {
   free_tier_pending?: boolean | null
   free_tier_row?: boolean | null
   unavailable_models?: string[] | null
+  usage?: Record<string, ModelUsage> | null
   [key: string]: unknown
 }
 /** ``hermes_cli/inventory.py::_apply_capabilities``. */
@@ -750,6 +751,18 @@ export interface ModelPricing {
   discount_percent?: number | null
   was_input?: string | null
   was_output?: string | null
+}
+/** Lifetime main-loop usage for one model id on one provider row (``task = ''`` only, auxiliary calls excluded). ``api_call_count`` is the sum over the row's routes and ``last_used_at`` the max ``last_seen`` in unix seconds (``None`` when unknown); ``routes`` keeps the base-URL breakdown. */
+export interface ModelUsage {
+  api_call_count?: number
+  last_used_at?: number | null
+  routes?: ModelUsageRoute[]
+}
+/** One billing base URL's share of a row's lifetime usage for one model id (``hermes_cli/model_usage.py::_row_usage``). Route identity is (provider, base URL), so the same model id on two endpoints arrives as two entries instead of one merged number. */
+export interface ModelUsageRoute {
+  base_url?: string
+  api_call_count?: number
+  last_used_at?: number | null
 }
 export interface ConnectorsListParams {
   profile?: string | null
