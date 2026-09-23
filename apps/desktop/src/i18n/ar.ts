@@ -2591,6 +2591,11 @@ export const ar = defineLocale({
       noModels: 'لا توجد نماذج',
       editModels: 'تحرير النماذج',
       refreshModels: 'تحديث النماذج',
+      showAllProviders: 'إظهار جميع المزودات',
+      showUsedProviders: 'إظهار المزودات التي تستخدمها فقط',
+      priorUse: 'استُخدم سابقًا · غير متاح',
+      priorUseTitle:
+        'استخدمه هذا الملف الشخصي من قبل، لكنه غير موجود الآن في كتالوج هذا المزود — سجل فقط، وغير قابل للاختيار.',
       fast: 'سريع'
     },
     modelOptions: {

@@ -2,6 +2,7 @@ import type { ModelOptionProvider } from '@hermes/shared'
 import { describe, expect, it } from 'vitest'
 
 import {
+  adaptiveDefaultVisibleKeys,
   collapseModelFamilies,
   defaultVisibleKeys,
   effectiveVisibleKeys,
@@ -324,5 +325,103 @@ describe('setProviderVisibility', () => {
     expect(next.has(modelVisibilityKey('nous', 'model'))).toBe(true)
     // The -fast sibling is represented by its base family, not its own key.
     expect(next.has(modelVisibilityKey('nous', 'model-fast'))).toBe(false)
+  })
+})
+
+// The usage-adaptive default only ever REPLACES the curated list for a catalog
+// the user has never customized. It is presentation: nothing here writes to the
+// stored set, so an explicit choice can never be overwritten by usage.
+describe('adaptive default visibility', () => {
+  const usageProvider = (
+    slug: string,
+    models: string[],
+    usage: ModelOptionProvider['usage']
+  ): ModelOptionProvider => ({ models, name: slug, slug, usage })
+
+  const SECOND = 1_700_000_000
+
+  it('drops a provider with no route history and keeps the used provider + its used route', () => {
+    const providers = [
+      usageProvider('google', ['gemini-3.1-pro', 'gemini-2.5-flash'], undefined),
+      usageProvider('nous', ['hermes-4.5', 'hermes-mini'], {
+        'hermes-mini': { api_call_count: 3, last_used_at: SECOND }
+      })
+    ]
+
+    const keys = adaptiveDefaultVisibleKeys(providers)
+
+    expect(keys.has(modelVisibilityKey('nous', 'hermes-mini'))).toBe(true)
+    expect(keys.has(modelVisibilityKey('nous', 'hermes-4.5'))).toBe(true)
+    expect([...keys].some(key => key.startsWith('google::'))).toBe(false)
+  })
+
+  it('fails open to the curated list when no row carries usage', () => {
+    const providers = [
+      usageProvider('google', ['gemini-3.1-pro', 'gemini-2.5-flash'], undefined),
+      usageProvider('nous', ['hermes-4.5'], {})
+    ]
+
+    expect(adaptiveDefaultVisibleKeys(providers)).toEqual(defaultVisibleKeys(providers))
+  })
+
+  it('keeps duplicate model ids separate: usage on one row never marks another row used', () => {
+    const providers = [
+      usageProvider('alpha', ['shared-1', 'shared-2'], {
+        'shared-1': { api_call_count: 5, last_used_at: SECOND }
+      }),
+      usageProvider('beta', ['shared-1', 'shared-2'], undefined)
+    ]
+
+    const keys = adaptiveDefaultVisibleKeys(providers)
+
+    expect(keys.has(modelVisibilityKey('alpha', 'shared-1'))).toBe(true)
+    expect([...keys].some(key => key.startsWith('beta::'))).toBe(false)
+  })
+
+  it('adds a used `-fast` sibling as its base family key, never an unrenderable id', () => {
+    const providers = [
+      usageProvider('nous', ['hermes-4.5', 'hermes-4.5-fast'], {
+        'hermes-4.5-fast': { api_call_count: 2, last_used_at: SECOND }
+      })
+    ]
+
+    const keys = adaptiveDefaultVisibleKeys(providers)
+
+    expect(keys.has(modelVisibilityKey('nous', 'hermes-4.5'))).toBe(true)
+    expect(keys.has(modelVisibilityKey('nous', 'hermes-4.5-fast'))).toBe(false)
+  })
+
+  it('honours featured_models for a used provider while still adding the used route', () => {
+    const providers = [
+      usageProvider('openrouter', ['flagship-a', 'flagship-b', 'long-tail-c'], undefined),
+      {
+        featured_models: ['flagship-a'],
+        models: ['flagship-a', 'flagship-b', 'long-tail-c'],
+        name: 'OpenRouter',
+        slug: 'openrouter',
+        usage: { 'long-tail-c': { api_call_count: 9, last_used_at: SECOND } }
+      }
+    ]
+
+    const keys = adaptiveDefaultVisibleKeys(providers)
+
+    expect(keys.has(modelVisibilityKey('openrouter', 'flagship-a'))).toBe(true)
+    expect(keys.has(modelVisibilityKey('openrouter', 'long-tail-c'))).toBe(true)
+    expect(keys.has(modelVisibilityKey('openrouter', 'flagship-b'))).toBe(false)
+  })
+
+  it('never writes to the stored set — an explicit choice keeps its own keys', () => {
+    const providers = [
+      usageProvider('google', ['gemini-3.1-pro'], undefined),
+      usageProvider('nous', ['hermes-4.5'], {
+        'hermes-4.5': { api_call_count: 1, last_used_at: SECOND }
+      })
+    ]
+
+    const stored = new Set([modelVisibilityKey('google', 'gemini-3.1-pro')])
+
+    expect(adaptiveDefaultVisibleKeys(providers).has(modelVisibilityKey('google', 'gemini-3.1-pro'))).toBe(false)
+    // The stored preference is what the UI reads once it exists — untouched.
+    expect(effectiveVisibleKeys(stored, providers).has(modelVisibilityKey('google', 'gemini-3.1-pro'))).toBe(true)
   })
 })

@@ -2958,6 +2958,10 @@ export const zhHant = defineLocale({
       noModels: '找不到模型',
       editModels: '編輯模型…',
       refreshModels: '重新整理模型',
+      showAllProviders: '顯示所有提供方',
+      showUsedProviders: '僅顯示你使用的提供方',
+      priorUse: '以前用過 · 無法使用',
+      priorUseTitle: '此設定曾用過它，但目前不在該提供方的目錄中 — 僅作歷史記錄，無法選取。',
       fast: '快速'
     },
     modelOptions: {

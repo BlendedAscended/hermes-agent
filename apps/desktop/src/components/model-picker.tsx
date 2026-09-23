@@ -7,6 +7,7 @@ import { getLocalModelsStatus } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { catalogProviderMatches, modelOptionsQueryKey, requestModelOptions } from '@/lib/model-options'
 import { currentPickerSelection } from '@/lib/model-status-label'
+import { absentUsageEntries, compareProvidersByUsage, rankModelsByUsage } from '@/lib/model-usage'
 import { foldIncludes, normalize } from '@/lib/text'
 import { useStoreSelector } from '@/lib/use-session-slice'
 import { $localModelsEnabled } from '@/store/local-models-flag'
@@ -269,7 +270,14 @@ function ModelResults({
   // pickers use, so one query orders identically on every surface. A query
   // that names the provider itself keeps its whole curated list, in order.
   const rankModels = (provider: ModelOptionProvider, models: readonly string[]) => {
-    if (!q || foldIncludes(provider.name, q) || foldIncludes(provider.slug, q)) {
+    if (!q) {
+      // No query: the routes this profile actually uses first (newest, then
+      // busiest), the untouched curated order behind them. Nothing used — or
+      // no usage metadata at all — is the curated list, unchanged.
+      return rankModelsByUsage(provider, models)
+    }
+
+    if (foldIncludes(provider.name, q) || foldIncludes(provider.slug, q)) {
       return [...models]
     }
 
@@ -284,9 +292,12 @@ function ModelResults({
   // can't change mid-session.
   const localModelsShown = $localModelsEnabled.get()
 
-  const configured = providers.filter(
-    p => (p.models ?? []).length > 0 && (localModelsShown || p.slug !== LOCAL_PROVIDER_SLUG)
-  )
+  // This dialog is the full catalog: it never hides a configured provider
+  // (onboarding opens it to choose a model of a provider that has no history
+  // yet), so usage only PROMOTES here — used providers float to the top.
+  const configured = providers
+    .filter(p => (p.models ?? []).length > 0 && (localModelsShown || p.slug !== LOCAL_PROVIDER_SLUG))
+    .sort(compareProvidersByUsage)
 
   // In-flight local downloads render as disabled progress rows: inside the
   // Local group when it exists, else as their own group (first download —
@@ -306,6 +317,10 @@ function ModelResults({
         }
 
         const unavailable = new Set(provider.unavailable_models ?? [])
+        // Used routes this provider's catalog no longer lists (retired or
+        // renamed ids). History only — rendered below as disabled, marked rows
+        // so the full catalog never pretends a dropped route is pickable.
+        const retired = absentUsageEntries(provider)
 
         return (
           <CommandGroup heading={<ProviderHeading provider={provider} />} key={provider.slug}>
@@ -363,6 +378,27 @@ function ModelResults({
                 </CommandItem>
               )
             })}
+            {retired.map(entry => (
+              // History, not an option: disabled exactly like a locked row and
+              // marked unavailable on the row. A usage counter says the route
+              // was called once — never that it still exists — so it must not
+              // be selectable, and its value is namespaced so it can't collide
+              // with a live model of the same id elsewhere.
+              <CommandItem
+                className="flex cursor-not-allowed items-center gap-2 pl-6 font-mono opacity-45"
+                data-prior-use={entry.model}
+                disabled
+                key={`prior:${provider.slug}:${entry.model}`}
+                value={`prior:${provider.slug}:${entry.model}`}
+              >
+                <span className="min-w-0 flex-1 truncate" title={t.shell.modelMenu.priorUseTitle}>
+                  <HighlightMatches foldSeparators query={search} text={entry.model} />
+                </span>
+                <span className="shrink-0 text-[0.62rem] uppercase tracking-wide opacity-80">
+                  {t.shell.modelMenu.priorUse}
+                </span>
+              </CommandItem>
+            ))}
             {groupDownloads.map(job => (
               <DownloadingModelRow jobId={job.jobId} key={job.jobId} target={job.target} />
             ))}

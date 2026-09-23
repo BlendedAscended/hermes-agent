@@ -3150,6 +3150,10 @@ export interface Translations {
       noModels: string
       editModels: string
       refreshModels: string
+      showAllProviders: string
+      showUsedProviders: string
+      priorUse: string
+      priorUseTitle: string
       fast: string
     }
     modelOptions: {

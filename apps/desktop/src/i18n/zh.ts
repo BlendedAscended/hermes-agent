@@ -3709,6 +3709,10 @@ export const zh = defineLocale({
       noModels: '未找到模型',
       editModels: '编辑模型…',
       refreshModels: '刷新模型',
+      showAllProviders: '显示所有提供方',
+      showUsedProviders: '仅显示你使用的提供方',
+      priorUse: '以前用过 · 不可用',
+      priorUseTitle: '此配置曾用过它，但当前不在该提供方的目录中 — 仅作历史记录，无法选择。',
       fast: '快速'
     },
     modelOptions: {

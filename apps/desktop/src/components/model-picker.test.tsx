@@ -204,3 +204,135 @@ describe('ModelPickerDialog search ranking', () => {
     })
   })
 })
+
+// This dialog is the FULL catalog — onboarding opens it for a provider with no
+// history yet — so usage can only promote here. Nothing is ever hidden by it.
+describe('ModelPickerDialog usage promotion', () => {
+  const SECOND = 1_700_000_000
+
+  const rowIndex = (pattern: RegExp) =>
+    screen
+      .getAllByRole('option')
+      .map(el => el.textContent?.trim() ?? '')
+      .findIndex(text => pattern.test(text))
+
+  it('floats used routes and used providers to the top of the catalog', async () => {
+    vi.mocked(requestModelOptions).mockResolvedValue({
+      providers: [
+        { slug: 'google', name: 'Google', models: ['gemini-3.1-pro'], authenticated: true },
+        {
+          slug: 'nous',
+          name: 'Nous',
+          models: ['hermes-4.5', 'hermes-mini'],
+          authenticated: true,
+          usage: { 'hermes-mini': { api_call_count: 9, last_used_at: SECOND } }
+        }
+      ]
+    })
+    renderPicker({ currentModel: 'gemini-3.1-pro', currentProvider: 'google' })
+
+    await screen.findByText('gemini-3.1-pro')
+
+    await waitFor(() => {
+      expect(rowIndex(/^hermes-mini/)).toBe(0)
+    })
+    expect(rowIndex(/^hermes-mini/)).toBeLessThan(rowIndex(/^hermes-4\.5/))
+    expect(rowIndex(/^hermes-4\.5/)).toBeLessThan(rowIndex(/^gemini-3\.1-pro/))
+  })
+
+  it('keeps a provider with no history in the full catalog', async () => {
+    vi.mocked(requestModelOptions).mockResolvedValue({
+      providers: [
+        {
+          slug: 'nous',
+          name: 'Nous',
+          models: ['hermes-mini'],
+          authenticated: true,
+          usage: { 'hermes-mini': { api_call_count: 9, last_used_at: SECOND } }
+        },
+        { slug: 'google', name: 'Google', models: ['gemini-3.1-pro'] }
+      ]
+    })
+    renderPicker({ currentModel: 'gemini-3.1-pro', currentProvider: 'google' })
+
+    await screen.findByText('gemini-3.1-pro')
+
+    expect(screen.getByText('hermes-mini')).toBeTruthy()
+  })
+
+  it('leaves the curated order alone when no row carries usage', async () => {
+    vi.mocked(requestModelOptions).mockResolvedValue({
+      providers: [{ slug: 'nous', name: 'Nous', models: ['hermes-4.5', 'hermes-mini', 'hermes-nano'] }]
+    })
+    renderPicker({ currentModel: 'hermes-4.5', currentProvider: 'nous' })
+
+    await screen.findByText('hermes-4.5')
+
+    expect(screen.getAllByRole('option').map(el => el.textContent?.trim())).toEqual([
+      'hermes-4.5',
+      'hermes-mini',
+      'hermes-nano'
+    ])
+  })
+})
+
+// `usage` outlives the catalog: a retired or renamed id stays in the history.
+// The full catalog must show that history rather than silently drop it — but
+// as unavailable, since a call count is not evidence the route still exists.
+describe('ModelPickerDialog routes the catalog has dropped', () => {
+  const SECOND = 1_700_000_000
+
+  const RETIRED_CATALOG = {
+    providers: [
+      {
+        slug: 'deepseek',
+        name: 'DeepSeek',
+        models: ['deepseek-v5'],
+        authenticated: true,
+        usage: { 'deepseek-v4-flash': { api_call_count: 2246, last_used_at: SECOND } }
+      }
+    ]
+  }
+
+  /** The marked history row for a dropped id, if it rendered at all. */
+  const historyRow = (model: string) =>
+    screen.getAllByRole('option').find(element => element.getAttribute('data-prior-use') === model)
+
+  const markedRows = () => screen.getAllByRole('option').filter(element => element.hasAttribute('data-prior-use'))
+
+  it('shows the dropped model as a disabled history row that cannot be selected', async () => {
+    vi.mocked(requestModelOptions).mockResolvedValue(RETIRED_CATALOG)
+    const onSelect = vi.fn()
+    renderPicker({ currentModel: 'deepseek-v5', currentProvider: 'deepseek', onSelect })
+
+    await screen.findByText('deepseek-v5')
+
+    const row = historyRow('deepseek-v4-flash')
+
+    expect(row?.textContent).toMatch(/deepseek-v4-flash/)
+    expect(row?.textContent).toMatch(/unavailable/i)
+    expect(row?.getAttribute('aria-disabled')).toBe('true')
+
+    // Enabled rows in this dialog commit on click (proven below), so a click
+    // that changes nothing is what makes "not selectable" real.
+    fireEvent.click(row as Element)
+    expect(onSelect).not.toHaveBeenCalled()
+  })
+
+  it('still commits a live model on click, and marks only the dropped one', async () => {
+    vi.mocked(requestModelOptions).mockResolvedValue(RETIRED_CATALOG)
+    const onSelect = vi.fn()
+    renderPicker({ currentModel: 'deepseek-v5', currentProvider: 'deepseek', onSelect })
+
+    await screen.findByText('deepseek-v5')
+
+    expect(markedRows().length).toBe(1)
+    expect(screen.getByText('deepseek-v5').closest('[cmdk-item]')?.getAttribute('aria-disabled')).not.toBe('true')
+
+    fireEvent.click(screen.getByText('deepseek-v5'))
+
+    await waitFor(() => {
+      expect(onSelect).toHaveBeenCalledWith({ model: 'deepseek-v5', provider: 'deepseek' })
+    })
+  })
+})

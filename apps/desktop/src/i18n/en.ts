@@ -3626,6 +3626,11 @@ export const en: Translations = {
       noModels: 'No models found',
       editModels: 'Edit models…',
       refreshModels: 'Refresh models',
+      showAllProviders: 'Show all providers',
+      showUsedProviders: 'Show only providers you use',
+      priorUse: 'used earlier · unavailable',
+      priorUseTitle:
+        'This profile used it, but it is not in this provider catalog now — history only, not selectable.',
       fast: 'Fast'
     },
     modelOptions: {
