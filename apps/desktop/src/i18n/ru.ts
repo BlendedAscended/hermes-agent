@@ -3293,6 +3293,11 @@ export const ru = defineLocale({
       noModels: 'Модели не найдены',
       editModels: 'Изменить модели…',
       refreshModels: 'Обновить модели',
+      showAllProviders: 'Показать всех провайдеров',
+      showUsedProviders: 'Только используемые провайдеры',
+      priorUse: 'использовалась раньше · недоступна',
+      priorUseTitle:
+        'Этот профиль уже использовал её, но сейчас её нет в каталоге провайдера — только история, выбрать нельзя.',
       fast: 'Быстрая'
     },
     modelOptions: {

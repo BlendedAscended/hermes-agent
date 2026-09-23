@@ -26,6 +26,14 @@ import { useI18n } from '@/i18n'
 import { isSubmitEnter } from '@/lib/ime'
 import { catalogProviderMatches, modelOptionsQueryKey, requestModelOptions } from '@/lib/model-options'
 import { displayModelName, modelDisplayParts } from '@/lib/model-status-label'
+import {
+  absentUsageEntries,
+  compareProvidersByUsage,
+  hasUsageMetadata,
+  type ModelUsageEntry,
+  providerUsageEntry,
+  rankFamiliesByUsage
+} from '@/lib/model-usage'
 import { reasoningEffortLabel } from '@/lib/reasoning-effort'
 import { foldIncludes, normalize } from '@/lib/text'
 import { useStoreSelector } from '@/lib/use-session-slice'
@@ -34,6 +42,7 @@ import { $localModelsEnabled } from '@/store/local-models-flag'
 import { $localRuntimeJobs, runningModelDownloads, watchLocalRuntimeJobs } from '@/store/local-runtime-jobs'
 import {
   $visibleModels,
+  adaptiveDefaultVisibleKeys,
   collapseModelFamilies,
   DEFAULT_VISIBLE_PER_PROVIDER,
   effectiveVisibleKeys,
@@ -111,6 +120,9 @@ interface ModelCatalogMenuProps {
 
 interface ProviderGroup {
   families: ModelFamily[]
+  /** Used routes this row's current catalog no longer lists. Rendered as
+   *  unavailable history rows — never selectable, never part of visibility. */
+  priorUse: ModelUsageEntry[]
   provider: ModelOptionProvider
 }
 
@@ -136,6 +148,9 @@ export function ModelCatalogMenu({
   const copyPicker = t.modelPicker
   const closeMenu = useContext(ModelMenuCloseContext)
   const [search, setSearch] = useState('')
+  // Escape hatch for the usage-adaptive default: local to the open menu (it is
+  // about this look, not a preference), and it never touches the stored set.
+  const [showAll, setShowAll] = useState(false)
   const collapsedProviders = useStoreCollapsed()
   const defaultEffort = useDefaultEffort()
   // Which models the user curated in Edit Models. Read HERE rather than taken
@@ -261,20 +276,57 @@ export function ModelCatalogMenu({
   // exists, else as their own trailing 'Local' group (first download —
   // nothing staged yet, so the catalog has no local provider row).
   const shownDownloads = q ? downloads.filter(job => foldIncludes(job.target || '', q)) : downloads
-  const hasLocalGroup = pickerProviders.some(provider => provider.slug === LOCAL_PROVIDER_SLUG)
 
   // Resolve visibility HERE, against the catalog we actually fetched: an empty
   // provider list would otherwise resolve to an empty key set that reads as
   // "user hid everything" and blanks the menu on first open.
+  //
+  // Usage-adaptive default: when the backend reports real usage and the user
+  // has never curated, the menu opens on the working set — used routes shown,
+  // providers with no route history folded away. Only ever reached with an
+  // empty stored set, so a user's own choice is never replaced; and it fails
+  // open (curated list, unchanged) when no usage metadata arrives.
+  const adaptiveDefault = useMemo(
+    () => visibleModels === null && hasUsageMetadata(pickerProviders),
+    [pickerProviders, visibleModels]
+  )
+
   const shownKeys = useMemo(
-    () => effectiveVisibleKeys(visibleModels, pickerProviders),
-    [visibleModels, pickerProviders]
+    () =>
+      adaptiveDefault && !showAll
+        ? adaptiveDefaultVisibleKeys(pickerProviders)
+        : effectiveVisibleKeys(visibleModels, pickerProviders),
+    [adaptiveDefault, pickerProviders, showAll, visibleModels]
+  )
+
+  // What the adaptive default folded away, for the Show-all row. The current
+  // route's provider is excluded: the catalog pins its row regardless, so it is
+  // never actually hidden. Search, Edit Models and Show all all still reach
+  // every one of these.
+  const hiddenProviders = useMemo(
+    () =>
+      adaptiveDefault
+        ? pickerProviders.filter(
+            provider =>
+              (provider.models?.length ?? 0) > 0 &&
+              !providerUsageEntry(provider) &&
+              !catalogProviderMatches(provider, current.provider)
+          )
+        : [],
+    [adaptiveDefault, pickerProviders, current.provider]
   )
 
   const groups = useMemo(
     () => groupModels(pickerProviders, search, { model: current.model, provider: current.provider }, shownKeys),
     [pickerProviders, search, current.model, current.provider, shownKeys]
   )
+
+  // Whether a Local group is actually RENDERED — not merely present in the
+  // catalog. The trailing download group exists to cover the case where no
+  // Local group was drawn; keying it off the catalog made a running download
+  // vanish whenever the Local rows were folded away (unused by the adaptive
+  // default, or filtered out by a curated set).
+  const hasLocalGroup = groups.some(group => group.provider.slug === LOCAL_PROVIDER_SLUG)
 
   // Presets are searchable rows like everything else — an unfiltered preset
   // sitting under zero model matches would otherwise become the "first match"
@@ -430,6 +482,24 @@ export function ModelCatalogMenu({
       />
 
       <DropdownMenuSeparator className="mx-0" />
+
+      {/* Escape hatch for the usage-adaptive default, above the rows it
+          narrows so it is visible without scrolling. Only rendered when
+          something is actually folded away, and never persisted. */}
+      {hiddenProviders.length > 0 ? (
+        <DropdownMenuItem
+          className={cn(dropdownMenuRow, 'text-(--ui-text-tertiary)')}
+          onSelect={event => {
+            event.preventDefault()
+            setShowAll(value => !value)
+          }}
+          textValue=""
+        >
+          <Codicon name="list-unordered" size="0.75rem" />
+          {showAll ? copy.showUsedProviders : copy.showAllProviders}
+          {!showAll ? <span className="ml-auto text-[0.62rem] tabular-nums">{hiddenProviders.length}</span> : null}
+        </DropdownMenuItem>
+      ) : null}
 
       {loading ? (
         <DropdownMenuGroup className="py-1">
@@ -594,6 +664,36 @@ export function ModelCatalogMenu({
                     )
                   })}
                 {!collapsed &&
+                  group.priorUse.map(entry => (
+                    // History, not an option: this id has left the provider's
+                    // catalog (retired/renamed), so the row is disabled and
+                    // carries an explicit unavailable marker on the row itself.
+                    // Usage says someone called it once — never that it can
+                    // still route — so it must not look, behave, or be
+                    // announced like a pickable model.
+                    <DropdownMenuItem
+                      className={cn(dropdownMenuRow, 'opacity-60')}
+                      data-prior-use={entry.model}
+                      disabled
+                      key={`prior:${group.provider.slug}:${entry.model}`}
+                      onSelect={event => event.preventDefault()}
+                      textValue={entry.model}
+                      title={copy.priorUseTitle}
+                    >
+                      <span className="min-w-0 flex-1 truncate">
+                        <span className="font-mono">
+                          <HighlightMatches foldSeparators query={search} text={entry.model} />
+                        </span>
+                        <span className="text-(--ui-text-tertiary)"> ({copy.priorUse})</span>
+                      </span>
+                      <Codicon
+                        className="ml-auto shrink-0 text-(--ui-text-tertiary)"
+                        name="circle-slash"
+                        size="0.75rem"
+                      />
+                    </DropdownMenuItem>
+                  ))}
+                {!collapsed &&
                   slug === LOCAL_PROVIDER_SLUG &&
                   shownDownloads.map(job => (
                     <DownloadingModelRow jobId={job.jobId} key={job.jobId} target={job.target} />
@@ -749,14 +849,34 @@ function groupModels(
 
     const families = allFamilies.filter(family => shown.has(family.id) || family.id === activeId)
 
-    if (families.length > 0) {
-      groups.push({ families, provider })
+    // Used routes this row's catalog no longer lists (retired or renamed ids).
+    // Kept as history, never as options: they are deliberately OUTSIDE `shown`,
+    // so they can't join the visibility set or be curated, and the active-model
+    // pin above ignores them. A query that matches one still surfaces the row —
+    // searching a retired id is exactly when you want to be told it is gone.
+    const priorUse = absentUsageEntries(provider).filter(
+      entry => !q || foldIncludes(`${entry.model} ${provider.name} ${provider.slug}`, q)
+    )
+
+    if (families.length > 0 || (q && priorUse.length > 0)) {
+      // Usage promotion (presentation order only; membership came from above).
+      // A search is its own ordering, so a live query keeps the filter's order.
+      groups.push({
+        families: q ? families : rankFamiliesByUsage(provider, families),
+        priorUse,
+        provider
+      })
     }
   }
 
-  // Stable, logical group order: alphabetical by provider name. (The backend
-  // floats the current provider first, which would reshuffle on every switch.)
-  groups.sort((a, b) => a.provider.name.localeCompare(b.provider.name))
+  // Stable, logical group order: providers you actually use first (newest,
+  // then busiest), the rest alphabetical by name. (The backend floats the
+  // current provider first, which would reshuffle on every switch.) A catalog
+  // with no usage metadata keeps the plain alphabetical order.
+  groups.sort(
+    (a, b) =>
+      compareProvidersByUsage(a.provider, b.provider) || a.provider.name.localeCompare(b.provider.name)
+  )
 
   return groups
 }

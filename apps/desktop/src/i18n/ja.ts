@@ -2994,6 +2994,11 @@ export const ja = defineLocale({
       noModels: 'モデルが見つかりません',
       editModels: 'モデルを編集…',
       refreshModels: 'モデルを更新',
+      showAllProviders: 'すべてのプロバイダーを表示',
+      showUsedProviders: '使用中のプロバイダーのみ表示',
+      priorUse: '以前に使用 · 利用不可',
+      priorUseTitle:
+        'このプロファイルで使用したことがありますが、現在このプロバイダーのカタログにはありません — 履歴のみで選択できません。',
       fast: '高速'
     },
     modelOptions: {

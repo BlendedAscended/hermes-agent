@@ -1,6 +1,7 @@
 import type { ModelOptionProvider } from '@hermes/shared'
 import { atom } from 'nanostores'
 
+import { hasUsageMetadata, modelUsageEntries, providerUsageEntry } from '@/lib/model-usage'
 import { persistString, storedString } from '@/lib/storage'
 
 const STORAGE_KEY = 'hermes.desktop.visible-models'
@@ -129,6 +130,56 @@ function expandProviderDefaults(provider: ModelOptionProvider, target: Set<strin
   for (const family of defaults) {
     target.add(modelVisibilityKey(provider.slug, family.id))
   }
+}
+
+/** Default-visible keys for a catalog the user has NEVER curated, when the
+ *  backend reports usage: each USED provider keeps its curated defaults plus
+ *  the routes actually used, while a provider with no route history drops out
+ *  of the default list entirely. Ordering is the catalog's business
+ *  (`rankFamiliesByUsage`); this decides membership only.
+ *
+ *  Fails open: a catalog with no usage metadata at all resolves to the
+ *  unchanged curated list, so an older runtime or an unreadable store renders
+ *  exactly what it did before. This is PRESENTATION ONLY — it never writes to
+ *  the stored set, so an explicit user choice is never replaced (the caller
+ *  only reaches for this when nothing is stored). */
+export function adaptiveDefaultVisibleKeys(providers: readonly ModelOptionProvider[]): Set<string> {
+  if (!hasUsageMetadata(providers)) {
+    return defaultVisibleKeys(providers)
+  }
+
+  const keys = new Set<string>()
+
+  for (const provider of providers) {
+    if (!providerUsageEntry(provider)) {
+      continue
+    }
+
+    expandProviderDefaults(provider, keys)
+
+    // A used id enters through the family row that represents it, so a used
+    // `…-fast` sibling (or a date-pinned snapshot) shows as its single family
+    // instead of a key nothing can render.
+    const familyFor = new Map<string, string>()
+
+    for (const family of collapseModelFamilies(provider.models ?? [])) {
+      familyFor.set(family.id, family.id)
+
+      if (family.fastId) {
+        familyFor.set(family.fastId, family.id)
+      }
+    }
+
+    for (const entry of modelUsageEntries(provider)) {
+      const familyId = familyFor.get(entry.model)
+
+      if (familyId) {
+        keys.add(modelVisibilityKey(provider.slug, familyId))
+      }
+    }
+  }
+
+  return keys
 }
 
 /** Resolve the canonical working set: the user's stored keys plus the curated
