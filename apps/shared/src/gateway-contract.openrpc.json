@@ -15534,6 +15534,21 @@
             ],
             "default": null,
             "title": "Unavailable Models"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/ModelUsage"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Usage"
           }
         },
         "required": [
@@ -15731,6 +15746,68 @@
           "provider"
         ],
         "title": "ModelSaveKeyResult",
+        "type": "object"
+      },
+      "ModelUsage": {
+        "additionalProperties": false,
+        "description": "Lifetime main-loop usage for one model id on one provider row (``task = ''`` only, auxiliary\ncalls excluded). ``api_call_count`` is the sum over the row's routes and ``last_used_at`` the max\n``last_seen`` in unix seconds (``None`` when unknown); ``routes`` keeps the base-URL breakdown.",
+        "properties": {
+          "api_call_count": {
+            "default": 0,
+            "title": "Api Call Count",
+            "type": "integer"
+          },
+          "last_used_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Last Used At"
+          },
+          "routes": {
+            "items": {
+              "$ref": "#/components/schemas/ModelUsageRoute"
+            },
+            "title": "Routes",
+            "type": "array"
+          }
+        },
+        "title": "ModelUsage",
+        "type": "object"
+      },
+      "ModelUsageRoute": {
+        "additionalProperties": false,
+        "description": "One billing base URL's share of a row's lifetime usage for one model id\n(``hermes_cli/model_usage.py::_row_usage``). Route identity is (provider, base URL), so the same\nmodel id on two endpoints arrives as two entries instead of one merged number.",
+        "properties": {
+          "base_url": {
+            "default": "",
+            "title": "Base Url",
+            "type": "string"
+          },
+          "api_call_count": {
+            "default": 0,
+            "title": "Api Call Count",
+            "type": "integer"
+          },
+          "last_used_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Last Used At"
+          }
+        },
+        "title": "ModelUsageRoute",
         "type": "object"
       },
       "NoticePayload": {

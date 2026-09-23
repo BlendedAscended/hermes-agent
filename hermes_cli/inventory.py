@@ -195,7 +195,23 @@ def build_model_options_payload(
     if not refresh:
         _prewarm_pricing_async(payload["providers"], current_provider=ctx.current_provider,
                                current_base_url=ctx.current_base_url)
+    _apply_route_usage(payload["providers"])
     return payload
+
+
+def _apply_route_usage(rows: list[dict]) -> None:
+    """Attach lifetime per-route usage (``session_model_usage``, main loop only) to the picker rows.
+
+    Only this builder — the shared ``model.options`` / ``/api/model/options`` payload — carries usage;
+    the CLI and auxiliary pickers read the same catalog without paying for the store read. Fail open:
+    an absent/unreadable store or an unmappable route leaves the rows exactly as built.
+    """
+    try:
+        from hermes_cli.model_usage import attach_route_usage, load_route_usage
+
+        attach_route_usage(rows, load_route_usage())
+    except Exception:
+        return
 
 
 # ─── Public: auxiliary-task pickers ─────────────────────────────────────
