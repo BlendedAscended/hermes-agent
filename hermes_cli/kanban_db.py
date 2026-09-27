@@ -1108,6 +1108,12 @@ def _validate_model_override(model: Optional[str], provider: Optional[str]) -> t
     provider = (provider or "").strip() or None
     if provider and not model:
         raise ValueError("provider_override requires a model_override")
+    if model:
+        # Card pins must not route around the fleet's banned providers
+        # (routing-policy.yaml banned_providers; ADR-151 D5, ADR-167).
+        from hermes_cli.kanban_provider_policy import refuse_banned_pin
+
+        refuse_banned_pin(model, provider)
     return model, provider
 
 
@@ -1313,6 +1319,13 @@ def create_task(
     )
     parents = tuple(p for p in parents if p)
     skills_list = _normalize_task_skills(skills)
+
+    # A card that lands a commit gets a derived key, so a second card for the
+    # same repo and sha returns the first instead of racing it to main.
+    if not idempotency_key:
+        from hermes_cli.kanban_provider_policy import derive_land_key
+
+        idempotency_key = derive_land_key(title, body)
 
     # Idempotency check BEFORE the write txn (no lock held); a concurrent-create
     # race may insert twice, the next lookup stabilises on the newest.

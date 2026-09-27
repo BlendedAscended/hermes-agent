@@ -2691,7 +2691,18 @@ def _worker_argv(task: Task, profile_arg: str, hermes_home: Optional[str]) -> li
     for sk in task.skills or ():
         if sk:
             cmd.extend(["--skills", sk])
-    if task.model_override:
+    # Rows written before the create-time refusal can still carry a banned pin;
+    # spawn those on the profile default instead of the barred provider.
+    from hermes_cli.kanban_provider_policy import banned_pin
+
+    _banned = banned_pin(task.model_override, task.provider_override) if task.model_override else None
+    if _banned:
+        _kb._log.warning(
+            "INCIDENT kanban: task %s pins model %r on banned provider %r; "
+            "spawning on the profile default instead",
+            task.id, task.model_override, _banned,
+        )
+    elif task.model_override:
         cmd.extend(["-m", task.model_override])
         # Pin the provider too so the worker resolves the model against the
         # intended backend (model X with provider Y is the classic board-stall).
