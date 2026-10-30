@@ -1,3 +1,9 @@
+## 2026-10-30 06:45 (UTC) — Fix Luna deterministic gate path and baseline exit checks
+
+**Changes:**
+- Resolve the VFlow task tsconfig to an absolute path and expect the observed unchanged full typecheck diagnostic to exit 1.
+- Updated scripts/ci/finalize_luna_continuity_goal.py; no runtime behavior or production configuration changed.
+
 ## 2026-10-30 05:58 (UTC) — Bind Luna gate to focused source and acceptance proof
 
 **Changes:**
