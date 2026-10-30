@@ -1,3 +1,10 @@
+## 2026-10-30 01:34 (UTC) — Check Hermes changed-code health across the full goal range
+
+**Changes:**
+- Run the changed-code health gate from the Hermes goal baseline through the current source commit so verifier-only commits cannot hide findings in earlier task packages.
+- Updated `scripts/ci/finalize_luna_continuity_goal.py`; no runtime or production behavior changed.
+- Verified the full goal range returns an empty findings list.
+
 ## 2026-10-30 01:34 (UTC) — Require tested Hermes main integration in Luna receipt
 
 **Changes:**
