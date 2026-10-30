@@ -634,14 +634,13 @@ def run_collect(evidence_dir: Path, receipt_path: Path) -> dict:
     build["passed"] = build["passed"] and build["baseline_files_unchanged"]
     checks.append(build)
 
-    hermes_parent = resolve_commit(HERMES_ROOT, f"{hermes_source}^")
     checks.append(execute_check(
         evidence_dir, "hermes-repository-check", HERMES_ROOT, hermes_source,
         ["venv/bin/python", "scripts/check"], minimal_env(), expected_exit=1,
         diagnostic_signature="scripts/check: 12 checks, FAILED: health"))
     checks.append(execute_check(
         evidence_dir, "hermes-changed-code-health", HERMES_ROOT, hermes_source,
-        ["venv/bin/python", "-m", "scripts.code_health", "--base", hermes_parent,
+        ["venv/bin/python", "-m", "scripts.code_health", "--base", HERMES_TASK_BASELINE,
          "--head", hermes_source, "--json"], minimal_env(), expected_empty_json=True))
 
     runtime_log = log_path(evidence_dir, "infra-truth-final")
