@@ -1,3 +1,10 @@
+## 2026-10-30 01:34 (UTC) — Require tested Hermes main integration in Luna receipt
+
+**Changes:**
+- Bind task source paths to the goal baseline and require a verified local main integration record in the deterministic receipt.
+- Updated `scripts/ci/finalize_luna_continuity_goal.py`; no runtime API or production configuration changed.
+- The receipt remains incomplete until the narrow main port is tested and recorded.
+
 ## 2026-10-30 01:25 (UTC) — Add bounded runtime probes and source-bound continuity gate
 
 **Changes:**

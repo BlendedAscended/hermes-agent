@@ -16,6 +16,9 @@ from pathlib import Path
 
 
 HERMES_ROOT = Path(__file__).resolve().parents[2]
+HERMES_TASK_BASELINE = "d923a5eb487a17c0a68801bba9ef0f56c81040a8"
+HERMES_MAIN_PREFLIGHT = HERMES_ROOT / ".session/evidence/hermes-main-merge-preflight-20261030.json"
+HERMES_MAIN_INTEGRATION_RECORD = HERMES_ROOT / ".session/evidence/hermes-main-integration-20261030.json"
 PROJECTS = Path("/Users/sandeepsingh/Projects/Project26")
 JACK_ROOT = PROJECTS / "Agents/jack-exec"
 JACK_WORKTREE = PROJECTS / "Agents/.worktrees/jack-exec-luna-integration-20261030"
@@ -118,7 +121,7 @@ def resolve_commit(repo: Path, revision: str) -> str:
 
 
 def task_paths(repo: Path, revision: str) -> list[str]:
-    parent = resolve_commit(repo, f"{revision}^")
+    parent = HERMES_TASK_BASELINE if repo.resolve() == HERMES_ROOT.resolve() else resolve_commit(repo, f"{revision}^")
     return [
         path
         for path in run_git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", parent, revision).splitlines()
@@ -283,6 +286,7 @@ def branch_evidence(hermes_source: str, aict_source: str) -> dict:
         ["git", "-C", str(VFLOW_ROOT), "merge-base", "--is-ancestor", VFLOW_SOURCE_COMMIT, "main"]
     ).returncode == 0
     divergence = run_git(HERMES_ROOT, "rev-list", "--left-right", "--count", "main...fleet-py311-pin").split()
+    main_integration = hermes_main_integration_evidence(hermes_source)
     return {
         "hermes": {
             "branch": hermes_branch,
@@ -293,7 +297,8 @@ def branch_evidence(hermes_source: str, aict_source: str) -> dict:
             "source_on_default_main": hermes_main_reachable,
             "default_main_ahead_by": int(divergence[0]),
             "target_branch_ahead_by": int(divergence[1]),
-            "integration_note": "Committed on fleet-py311-pin; default main is deeply divergent and was not rewritten or merged.",
+            "default_main_integration": main_integration,
+            "integration_note": "The task source is committed on fleet-py311-pin; the default main port is pending the documented conflict decision.",
         },
         "jack_exec": {"branch": run_git(JACK_WORKTREE, "branch", "--show-current"), "source_commit": JACK_SOURCE_COMMIT, "source_on_main": jack_reachable},
         "vflow": {"branch": run_git(VFLOW_WORKTREE, "branch", "--show-current"), "source_commit": VFLOW_SOURCE_COMMIT, "source_on_main": vflow_reachable},
@@ -304,6 +309,71 @@ def branch_evidence(hermes_source: str, aict_source: str) -> dict:
             "receipt_implementation_on_main": aict_main_reachable,
         },
     }
+
+
+def hermes_main_integration_evidence(hermes_source: str) -> dict:
+    preflight = {"path": str(HERMES_MAIN_PREFLIGHT), "exists": HERMES_MAIN_PREFLIGHT.is_file()}
+    if preflight["exists"]:
+        preflight["sha256"] = sha256_file(HERMES_MAIN_PREFLIGHT)
+        try:
+            record = json.loads(HERMES_MAIN_PREFLIGHT.read_text(encoding="utf-8-sig"))
+            output_hash = sha256_bytes(record.get("output", "").encode())
+            preflight.update({
+                "exit_code": record.get("exit_code"),
+                "source_commit_matches": resolve_commit(HERMES_ROOT, record.get("source_commit", "")) == hermes_source,
+                "target_branch": record.get("target_branch"),
+                "conflict_paths": record.get("conflict_paths", []),
+                "output_hash_valid": output_hash == record.get("output_sha256"),
+            })
+            preflight["valid"] = (
+                preflight["exit_code"] == 1
+                and preflight["source_commit_matches"]
+                and preflight["target_branch"] == "main"
+                and preflight["output_hash_valid"]
+                and bool(preflight["conflict_paths"])
+            )
+        except (OSError, RuntimeError, ValueError, TypeError, json.JSONDecodeError):
+            preflight["valid"] = False
+            preflight["error"] = "preflight receipt is malformed or does not match the task source"
+    else:
+        preflight["valid"] = False
+
+    integration = {
+        "path": str(HERMES_MAIN_INTEGRATION_RECORD),
+        "recorded": HERMES_MAIN_INTEGRATION_RECORD.is_file(),
+        "source_commit_matches": False,
+        "integration_commit": None,
+        "integration_commit_on_default_main": False,
+        "tests_passed": False,
+        "changed_code_health_passed": False,
+    }
+    if integration["recorded"]:
+        integration["sha256"] = sha256_file(HERMES_MAIN_INTEGRATION_RECORD)
+        try:
+            record = json.loads(HERMES_MAIN_INTEGRATION_RECORD.read_text(encoding="utf-8-sig"))
+            integration_commit = resolve_commit(HERMES_ROOT, record.get("integration_commit", ""))
+            integration.update({
+                "integration_commit": integration_commit,
+                "source_commit_matches": resolve_commit(
+                    HERMES_ROOT, record.get("task_source_commit", "")) == hermes_source,
+                "integration_commit_on_default_main": run_bounded([
+                    "git", "-C", str(HERMES_ROOT), "merge-base", "--is-ancestor", integration_commit, "main",
+                ]).returncode == 0,
+                "tests_passed": record.get("tests_passed") is True,
+                "changed_code_health_passed": record.get("changed_code_health_passed") is True,
+                "record_branch": record.get("target_branch"),
+            })
+        except (OSError, RuntimeError, ValueError, TypeError, json.JSONDecodeError):
+            integration["record_error"] = "integration receipt is malformed or references an unknown commit"
+    integration["complete"] = (
+        integration["source_commit_matches"]
+        and integration["integration_commit_on_default_main"]
+        and integration["tests_passed"]
+        and integration["changed_code_health_passed"]
+        and integration.get("record_branch") == "main"
+    )
+    integration["preflight"] = preflight
+    return integration
 
 
 def runtime_policy() -> dict:
@@ -826,6 +896,13 @@ def validate_branch_evidence(report: dict, check_current: bool) -> list[str]:
     hermes_branch = report.get("branches", {}).get("hermes", {})
     if not hermes_branch.get("source_on_target_branch") or hermes_branch.get("branch") != "fleet-py311-pin":
         errors.append("Hermes task commit is not on the recorded active target branch")
+    integration = hermes_branch.get("default_main_integration", {})
+    if not integration.get("complete"):
+        conflicts = integration.get("preflight", {}).get("conflict_paths", [])
+        errors.append(
+            "Hermes task source is not integrated and tested on local main"
+            + (f"; preflight conflicts: {', '.join(conflicts)}" if conflicts else "")
+        )
     if check_current:
         errors.extend(validate_branch_snapshot(report))
     return errors
@@ -841,7 +918,7 @@ def validate_branch_snapshot(report: dict) -> list[str]:
     except (OSError, RuntimeError, IndexError, ValueError) as exc:
         return [f"cannot refresh branch reachability: {exc}"]
     branch_fields = {
-        "hermes": ("branch", "source_on_target_branch", "source_on_default_main"),
+        "hermes": ("branch", "source_on_target_branch", "source_on_default_main", "default_main_integration"),
         "jack_exec": ("source_on_main",),
         "vflow": ("source_on_main",),
         "ai_config_transfer": ("receipt_implementation_on_main",),
