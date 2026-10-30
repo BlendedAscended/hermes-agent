@@ -641,13 +641,13 @@ def run_collect(evidence_dir: Path, receipt_path: Path) -> dict:
         "include": [str((VFLOW_WORKTREE / path).resolve()) for path in vflow_code_paths],
     }, indent=2) + "\n", encoding="utf-8")
     checks.append(execute_check(evidence_dir, "vflow-task-typecheck", VFLOW_WORKTREE, vflow_source,
-        ["./node_modules/.bin/tsc", "--noEmit", "--pretty", "false", "--project", str(task_typecheck_config)],
+        ["./node_modules/.bin/tsc", "--noEmit", "--pretty", "false", "--project", str(task_typecheck_config.resolve())],
         vflow_env, extra_inputs=[task_typecheck_config]))
 
     full_typecheck = execute_check(
         evidence_dir, "vflow-full-typecheck-baseline", VFLOW_WORKTREE, vflow_source,
         ["./node_modules/.bin/tsc", "--noEmit", "--pretty", "false"], vflow_env,
-        expected_exit=2,
+        expected_exit=1,
         diagnostic_signature=".next/types/app/api/fleet/runner/route.ts(38,7): error TS2344")
     typecheck_base = resolve_commit(VFLOW_ROOT, f"{vflow_source}^")
     full_typecheck["baseline_files_unchanged"] = run_bounded([
