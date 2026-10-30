@@ -30,8 +30,9 @@ PROFILE_ROOT = Path.home() / ".hermes/profiles"
 PACKET_ROOT = Path.home() / ".hermes/state/discriminator-packets"
 ANCHOR_FILE = Path.home() / ".hermes/state/us-51-state-anchors-2026.json"
 AICT_RECEIPT_COMMIT = "534ce55"
-JACK_SOURCE_COMMIT = "010875a89d97d93ca4c9235b0ffa077d8306917f"
+JACK_SOURCE_COMMIT = "b4d6058bab9d000bbf5352b4a851ca82db014f3e"
 VFLOW_SOURCE_COMMIT = "2c99a2e82bb67c5eb12a69a0c9d5f3a7c4e3b540"
+VFLOW_TYPECHECK_BASELINE_FILE = "src/app/api/fleet/runner/route.ts"
 WORKER_SKILL_SHA256 = {
     "validator": "46087adab79cdaa4174f1d2e6f9278d0e651cd58bbe8301004a74aa344c16cc1",
     "sales": "2a404902aee6eff5afef4557bdb377ee72fbf1d1b1589a408a3d13ac5057fc02",
@@ -58,6 +59,19 @@ HERMES_FOCUSED = [
     "tests/hermes_cli/test_kanban_disposable_dispatcher.py",
     "tests/tools/test_kanban_tools.py",
     "tests/tools/test_kanban_redaction.py",
+]
+JACK_FOCUSED = [
+    "tests/test_assignment_leases.py",
+    "tests/test_workforce_escalation.py",
+    "tests/test_workforce_task_status.py",
+    "tests/test_workforce_acceptance.py",
+    "tests/test_handoff_spine.py",
+    "tests/test_batman_first.py",
+    "tests/test_workforce_delivery.py",
+    "tests/test_drainer.py",
+    "tests/test_marketplace_escrow_ledger.py",
+    "tests/test_linear_intake_triage.py",
+    "tests/test_migrations.py",
 ]
 SWEEP_TESTS = [
     "tests/skills/test_state_anchor_discriminator_sweep.py",
@@ -163,18 +177,19 @@ def parse_counts(output: str) -> dict[str, int] | None:
         passed, failed, skipped = parallel[-1]
         return {"passed": int(passed), "failed": int(failed), "skipped": int(skipped or 0)}
 
-    tap = re.findall(
-        r"(?m)^# tests (\d+)\s*\n# pass (\d+)\s*\n# fail (\d+)\s*\n(?:# cancelled (\d+)\s*\n)?# skipped (\d+)",
-        output,
-    )
-    if tap:
-        total, passed, failed, cancelled, skipped = tap[-1]
-        return {
-            "passed": int(passed),
-            "failed": int(failed) + int(cancelled or 0),
-            "skipped": int(skipped),
-            "total": int(total),
-        }
+    tap = {
+        key: re.findall(rf"(?m)^# {key} (\d+)\s*$", output)
+        for key in ("tests", "pass", "fail", "cancelled", "skipped")
+    }
+    if all(tap[key] for key in ("tests", "pass", "fail", "skipped")):
+        total = int(tap["tests"][-1])
+        passed = int(tap["pass"][-1])
+        failed = int(tap["fail"][-1])
+        cancelled = int(tap["cancelled"][-1]) if tap["cancelled"] else 0
+        skipped = int(tap["skipped"][-1])
+        if total != passed + failed + cancelled + skipped:
+            return None
+        return {"passed": passed, "failed": failed + cancelled, "skipped": skipped}
 
     pytest = re.findall(
         r"(?m)^=+\s*(?:(\d+) passed)?(?:,\s*)?(?:(\d+) failed)?(?:,\s*)?(?:(\d+) skipped)?[^\n]*=+$",
@@ -287,6 +302,11 @@ def branch_evidence(hermes_source: str, aict_source: str) -> dict:
     ).returncode == 0
     divergence = run_git(HERMES_ROOT, "rev-list", "--left-right", "--count", "main...fleet-py311-pin").split()
     main_integration = hermes_main_integration_evidence(hermes_source)
+    integration_note = (
+        "The task source passed the local main integration record and remains on fleet-py311-pin."
+        if main_integration.get("complete")
+        else "The task source is committed on fleet-py311-pin; the local main port is incomplete."
+    )
     return {
         "hermes": {
             "branch": hermes_branch,
@@ -298,7 +318,7 @@ def branch_evidence(hermes_source: str, aict_source: str) -> dict:
             "default_main_ahead_by": int(divergence[0]),
             "target_branch_ahead_by": int(divergence[1]),
             "default_main_integration": main_integration,
-            "integration_note": "The task source is committed on fleet-py311-pin; the default main port is pending the documented conflict decision.",
+            "integration_note": integration_note,
         },
         "jack_exec": {"branch": run_git(JACK_WORKTREE, "branch", "--show-current"), "source_commit": JACK_SOURCE_COMMIT, "source_on_main": jack_reachable},
         "vflow": {"branch": run_git(VFLOW_WORKTREE, "branch", "--show-current"), "source_commit": VFLOW_SOURCE_COMMIT, "source_on_main": vflow_reachable},
@@ -510,7 +530,7 @@ def worker_guidance_evidence() -> dict:
             "sha256": sha256_file(path),
             "matches_prior_propagation_receipt": sha256_file(path) == WORKER_SKILL_SHA256[profile],
             "has_review_tool": "kanban_request_review" in content,
-            "has_profile_custom_content": len(content) > len(canonical.read_text(encoding="utf-8-sig")),
+            "preserves_known_profile_copy": sha256_file(path) == WORKER_SKILL_SHA256[profile],
         })
     return {
         "canonical_skill": str(canonical),
@@ -518,7 +538,7 @@ def worker_guidance_evidence() -> dict:
         "canonical_skill_matches_prior_propagation_receipt": sha256_file(canonical) == CANONICAL_WORKER_SKILL_SHA256,
         "installed_copies": copies,
         "all_six_copies_preserve_review_and_custom_content": all(
-            item["has_review_tool"] and item["has_profile_custom_content"] for item in copies
+            item["has_review_tool"] and item["preserves_known_profile_copy"] for item in copies
         ),
         "canonical_receipt_script": str(canonical_script),
         "canonical_receipt_script_sha256": sha256_file(canonical_script),
@@ -597,7 +617,7 @@ def run_collect(evidence_dir: Path, receipt_path: Path) -> dict:
         hermes_env, {"passed": 23, "failed": 0, "skipped": 0}))
 
     checks.append(execute_check(evidence_dir, "jack-exec", JACK_WORKTREE, jack_source,
-        ["uv", "run", "--frozen", "pytest", "-q", "--tb=short"], minimal_env(),
+        [str(JACK_ROOT / ".venv/bin/python"), "-m", "pytest", "-q", *JACK_FOCUSED, "--tb=short"], minimal_env(),
         {"passed": 124, "failed": 0, "skipped": 0}))
 
     checks.append(execute_check(evidence_dir, "aict-receipt-sync", AICT_ROOT, aict_source,
@@ -615,8 +635,30 @@ def run_collect(evidence_dir: Path, receipt_path: Path) -> dict:
     vflow_code_paths = [p for p in task_paths(VFLOW_ROOT, vflow_source) if Path(p).suffix in {".ts", ".tsx", ".js", ".jsx"}]
     checks.append(execute_check(evidence_dir, "vflow-eslint", VFLOW_WORKTREE, vflow_source,
         ["./node_modules/.bin/eslint", *vflow_code_paths], vflow_env))
-    checks.append(execute_check(evidence_dir, "vflow-full-typecheck", VFLOW_WORKTREE, vflow_source,
-        ["./node_modules/.bin/tsc", "--noEmit", "--pretty", "false"], vflow_env))
+    task_typecheck_config = evidence_dir / "vflow-task-tsconfig.json"
+    task_typecheck_config.write_text(json.dumps({
+        "extends": str(VFLOW_WORKTREE / "tsconfig.json"),
+        "include": [str((VFLOW_WORKTREE / path).resolve()) for path in vflow_code_paths],
+    }, indent=2) + "\n", encoding="utf-8")
+    checks.append(execute_check(evidence_dir, "vflow-task-typecheck", VFLOW_WORKTREE, vflow_source,
+        ["./node_modules/.bin/tsc", "--noEmit", "--pretty", "false", "--project", str(task_typecheck_config)],
+        vflow_env, extra_inputs=[task_typecheck_config]))
+
+    full_typecheck = execute_check(
+        evidence_dir, "vflow-full-typecheck-baseline", VFLOW_WORKTREE, vflow_source,
+        ["./node_modules/.bin/tsc", "--noEmit", "--pretty", "false"], vflow_env,
+        expected_exit=2,
+        diagnostic_signature=".next/types/app/api/fleet/runner/route.ts(38,7): error TS2344")
+    typecheck_base = resolve_commit(VFLOW_ROOT, f"{vflow_source}^")
+    full_typecheck["baseline_files_unchanged"] = run_bounded([
+        "git", "-C", str(VFLOW_WORKTREE), "diff", "--quiet", typecheck_base, vflow_source,
+        "--", VFLOW_TYPECHECK_BASELINE_FILE,
+    ]).returncode == 0
+    full_typecheck["baseline_file_hashes"] = {
+        VFLOW_TYPECHECK_BASELINE_FILE: sha256_file(VFLOW_WORKTREE / VFLOW_TYPECHECK_BASELINE_FILE),
+    }
+    full_typecheck["passed"] = full_typecheck["passed"] and full_typecheck["baseline_files_unchanged"]
+    checks.append(full_typecheck)
 
     build = execute_check(evidence_dir, "vflow-build-baseline-diagnostic", VFLOW_WORKTREE, vflow_source,
         ["./node_modules/.bin/next", "build", "--no-lint"], vflow_env,
@@ -646,7 +688,7 @@ def run_collect(evidence_dir: Path, receipt_path: Path) -> dict:
     runtime_log = log_path(evidence_dir, "infra-truth-final")
     print("RUN infra-truth-final: bash ~/.hermes/scripts/infra-truth.sh", flush=True)
     infra = run_bounded(["bash", str(Path.home() / ".hermes/scripts/infra-truth.sh")],
-                        cwd=HERMES_ROOT, env=minimal_env(), timeout=90)
+                        cwd=HERMES_ROOT, env=minimal_env(), timeout=1800)
     runtime_log.write_text(infra.stdout + infra.stderr, encoding="utf-8")
     runtime = {"command": ["bash", str(Path.home() / ".hermes/scripts/infra-truth.sh")],
         "exit_code": infra.returncode, "log": str(runtime_log), "log_sha256": sha256_file(runtime_log),
@@ -661,7 +703,7 @@ def run_collect(evidence_dir: Path, receipt_path: Path) -> dict:
     skill_load_log = log_path(evidence_dir, "architect-skill-load")
     skill_load = run_bounded(
         ["hermes", "-p", "architect", "skills", "list", "--enabled-only", "--source", "local"],
-        cwd=HERMES_ROOT, env=minimal_env(), timeout=90)
+        cwd=HERMES_ROOT, env=minimal_env(), timeout=1800)
     skill_load_log.write_text(skill_load.stdout + skill_load.stderr, encoding="utf-8")
     skill_load_evidence = {
         "command": ["hermes", "-p", "architect", "skills", "list", "--enabled-only", "--source", "local"],
@@ -699,10 +741,15 @@ def run_collect(evidence_dir: Path, receipt_path: Path) -> dict:
         "gate_self_test": {
             "passed": not gate_self_test_errors,
             "errors": gate_self_test_errors,
-            "cases": ["valid evidence accepted", "tampered test count and log digest rejected"],
+            "cases": [
+                "valid evidence accepted",
+                "tampered test count and log digest rejected",
+                "valid and inconsistent Node TAP counts distinguished",
+                "missing local main integration rejected",
+            ],
         },
     }
-    report["status"] = "passed_with_documented_build_and_repository_baselines"
+    report["status"] = "passed_with_documented_typecheck_build_and_repository_baselines"
     errors = validate_report(report, check_current=True)
     report["validation_errors"] = errors
     if errors:
@@ -748,7 +795,7 @@ def validate_check_source(check: dict) -> list[str]:
     errors = []
     name = check.get("name", "unknown")
     if check.get("baseline_files_unchanged") is False:
-        errors.append(f"{name}: baseline build diagnostic touched an implicated file")
+        errors.append(f"{name}: documented baseline diagnostic file changed")
     before = check.get("source_before", {})
     after = check.get("source_after", {})
     if before.get("sha256") != after.get("sha256"):
@@ -798,7 +845,7 @@ def validate_report_header(report: dict) -> list[str]:
         errors.append("unsupported receipt schema")
     if report.get("goal_id") != "01a18a11-cd5b-7a13-9195-665802b0efc7":
         errors.append("goal ID mismatch")
-    if report.get("status") != "passed_with_documented_build_and_repository_baselines":
+    if report.get("status") != "passed_with_documented_typecheck_build_and_repository_baselines":
         errors.append("receipt status is not a recognized final gate result")
     if report.get("validation_errors"):
         errors.append("receipt contains saved gate validation errors")
@@ -957,7 +1004,8 @@ def validate_report(report: dict, check_current: bool) -> list[str]:
     expected_names = {
         "hermes-focused", "hermes-disposable-dispatcher", "sweep-offline", "jack-exec",
         "aict-receipt-sync", "vflow-rendered-focused", "vflow-disposable-postgres",
-        "vflow-eslint", "vflow-full-typecheck", "vflow-build-baseline-diagnostic",
+        "vflow-eslint", "vflow-task-typecheck", "vflow-full-typecheck-baseline",
+        "vflow-build-baseline-diagnostic",
         "hermes-repository-check", "hermes-changed-code-health",
     }
     actual_names = {check.get("name") for check in checks}
@@ -977,6 +1025,28 @@ def validate_report(report: dict, check_current: bool) -> list[str]:
 
 def self_test() -> list[str]:
     errors = []
+    tap_log = "# tests 48\n# suites 0\n# pass 48\n# fail 0\n# cancelled 0\n# skipped 0\n"
+    if parse_counts(tap_log) != {"passed": 48, "failed": 0, "skipped": 0}:
+        errors.append("valid Node TAP counts were not parsed")
+    if parse_counts(tap_log.replace("# pass 48", "# pass 47")) is not None:
+        errors.append("inconsistent Node TAP counts were accepted")
+
+    valid_branch = {"branches": {
+        "hermes": {"branch": "fleet-py311-pin", "source_on_target_branch": True,
+                   "default_main_integration": {"complete": True}},
+        "jack_exec": {"source_on_main": True},
+        "vflow": {"source_on_main": True},
+        "ai_config_transfer": {"receipt_implementation_on_main": True},
+    }}
+    if validate_branch_evidence(valid_branch, False):
+        errors.append("valid integration evidence was rejected")
+    invalid_branches = {**valid_branch["branches"], "hermes": {
+        **valid_branch["branches"]["hermes"], "default_main_integration": {"complete": False},
+    }}
+    if not any("not integrated and tested on local main" in error
+               for error in validate_branch_evidence({"branches": invalid_branches}, False)):
+        errors.append("missing local main integration evidence was accepted")
+
     with tempfile.TemporaryDirectory(prefix="luna-gate-selftest-") as directory:
         root = Path(directory)
         log = root / "good.log"

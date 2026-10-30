@@ -1,3 +1,11 @@
+## 2026-10-30 05:58 (UTC) — Bind Luna gate to focused source and acceptance proof
+
+**Changes:**
+- Corrected the Jack Exec source pin and narrowed its runner to the documented lease and outbox suites; parse Node TAP counts with intervening suite metadata.
+- Self test valid and invalid count evidence and local main integration status, record the full task scoped VFlow typecheck, and qualify its unchanged project typecheck diagnostic by source hash.
+- Compare installed worker skills to their recorded profile hashes and allow live truth probes to finish without an arbitrary 90 second timeout.
+- Updated `scripts/ci/finalize_luna_continuity_goal.py`; no runtime, provider, or production configuration changed.
+
 ## 2026-10-30 01:34 (UTC) — Check Hermes changed-code health across the full goal range
 
 **Changes:**
