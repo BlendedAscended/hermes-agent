@@ -33,12 +33,13 @@ def worker_env(monkeypatch, tmp_path):
     conn = kbc.connect()
     try:
         tid = kb.create_task(conn, title="worker-test", assignee="test-worker")
-        kb.claim_task(conn, tid)
+        claimed = kb.claim_task(conn, tid)
         run_id = kb._current_run_id(conn, tid)
     finally:
         conn.close()
     monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
     monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
+    monkeypatch.setenv("HERMES_KANBAN_CLAIM_LOCK", claimed.claim_lock)
     return tid
 
 
@@ -133,13 +134,27 @@ def test_scrub_respects_force_flag_regardless_of_config(worker_env, monkeypatch)
 # Negative test — legacy result field is also scrubbed
 # ---------------------------------------------------------------------------
 
-def test_kanban_complete_result_field_scrubbed(worker_env):
+def test_kanban_complete_result_field_scrubbed(worker_env, tmp_path):
     """Legacy result field must be scrubbed just like summary."""
     from tools import kanban_tools as kt
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli.kanban_task_continuity import task_input_digest
+    import hashlib
+
     secret = "sk-" + "D" * 48
-    kt._handle_complete({"result": f"finished with key={secret}"})
+    report = tmp_path / "verification.json"
+    report.write_text('{"exit_code":0,"passed":1,"failed":0,"skipped":0}', encoding="utf-8")
+    digest = hashlib.sha256(report.read_bytes()).hexdigest()
+    with kbc.connect() as conn:
+        task = kb.get_task(conn, worker_env)
+        receipt = {"version": 1, "task_id": worker_env, "run_id": task.current_run_id,
+            "tenant": task.tenant, "input_sha256": task_input_digest(conn, worker_env),
+            "idempotency_key": f"{worker_env}:redaction", "disposition": "complete",
+            "external_effect_state": "none", "verification": {"exit_code": 0, "passed": 1,
+                "failed": 0, "skipped": 0, "evidence_path": str(report), "evidence_sha256": digest},
+            "evidence": [{"path": str(report), "sha256": digest}]}
+    kt._handle_complete({"result": f"finished with key={secret}", "outcome_receipt": receipt})
     conn = kbc.connect()
     try:
         run = kb.latest_run(conn, worker_env)

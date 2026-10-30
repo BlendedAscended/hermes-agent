@@ -241,6 +241,27 @@ def _worker_run_id(task_id: str) -> Optional[int]:
         return None
 
 
+def _accept_worker_outcome(conn, tid: str, args: dict, disposition: str, handoff: dict) -> Optional[int]:
+    """Persist proof for dispatcher workers; interactive operators retain canonical APIs."""
+    if not os.environ.get("HERMES_KANBAN_TASK"):
+        return None
+    receipt = args.get("outcome_receipt")
+    _check(isinstance(receipt, dict), "dispatcher workers must supply outcome_receipt before handoff")
+    run_id = _worker_run_id(tid)
+    token = _own_task_env(tid, "HERMES_KANBAN_CLAIM_LOCK")
+    _check(run_id is not None and bool(token), "dispatcher worker run identity or claim token is unavailable")
+    _check(receipt.get("disposition") == disposition,
+           f"outcome_receipt disposition must be {disposition!r}")
+    from hermes_cli.kanban_task_continuity import (
+        OutcomeReceiptError, accept_and_reconcile, validate_handoff_artifacts,
+    )
+    try:
+        validate_handoff_artifacts(handoff)
+        return accept_and_reconcile(conn, tid, run_id, token, receipt, handoff)
+    except OutcomeReceiptError as exc:
+        raise _Reject(str(exc)) from exc
+
+
 def _stamp_worker_session_metadata(task_id: str, metadata: Optional[dict]) -> Optional[dict]:
     """Add trusted worker session id metadata for this worker's own task."""
     session_id = _own_task_env(task_id, "HERMES_SESSION_ID")
@@ -745,9 +766,17 @@ def _handle_complete(args: dict, **kw) -> str:
         # judge by calling kanban_complete before acceptance criteria are met. Only enforce when a judge is
         # actually reachable — see _goal_judge_available for why an unavailable judge fails open.
         task = kb.get_task(conn, tid)
-        _goal_gate("kanban_complete", task, tid, (summary or result or "").strip())
+        if not task or task.status != "done":
+            _goal_gate("kanban_complete", task, tid, (summary or result or "").strip())
         try:
-            ok = kb.complete_task(
+            if os.environ.get("HERMES_KANBAN_TASK"):
+                kb._gate_created_cards(conn, tid, created_cards, summary or result)
+                kb._gate_empty_completion(conn, tid, result=result, summary=summary)
+            receipt_id = _accept_worker_outcome(conn, tid, args, "complete", {
+                "result": result, "summary": summary, "metadata": metadata,
+                "created_cards": created_cards,
+            })
+            ok = (kb.get_task(conn, tid).status == "done") if receipt_id is not None else kb.complete_task(
                 conn, tid, result=result, summary=summary, metadata=metadata,
                 created_cards=created_cards, expected_run_id=_worker_run_id(tid))
         except kb.ArtifactPreservationError as artifact_err:
@@ -802,7 +831,7 @@ def _handle_complete(args: dict, **kw) -> str:
         # read `kanban_attachments` before completing saw an empty list and has
         # no way to observe what its completion just registered (#117360).
         # Report the card's durable attachment set in the result.
-        return _ok(task_id=tid, run_id=run.id if run else None,
+        return _ok(task_id=tid, run_id=run.id if run else None, outcome_receipt_id=receipt_id,
                    attachments=[
                        _fields(a, _ATTACHMENT_FIELDS)
                        for a in kb.list_attachments(conn, tid)])
@@ -897,11 +926,19 @@ def _handle_request_review(args: dict, **kw) -> str:
                f"reviewer profile {reviewer!r} is not installed. "
                f"Installed profiles: {', '.join(list_profile_names())}")
     with _board(args.get("board")) as (kb, conn):
-        _goal_gate("kanban_request_review", kb.get_task(conn, tid), tid, summary)
+        task = kb.get_task(conn, tid)
+        if not task or task.status != "review":
+            _goal_gate("kanban_request_review", task, tid, summary)
         try:
-            ok, fail_reason = kb.request_review(
-                conn, tid, summary=summary, metadata=metadata, reviewer=reviewer,
-                expected_run_id=_worker_run_id(tid), with_reason=True)
+            receipt_id = _accept_worker_outcome(conn, tid, args, "review", {
+                "summary": summary, "metadata": metadata, "reviewer": reviewer,
+            })
+            if receipt_id is not None:
+                ok, fail_reason = kb.get_task(conn, tid).status == "review", None
+            else:
+                ok, fail_reason = kb.request_review(
+                    conn, tid, summary=summary, metadata=metadata, reviewer=reviewer,
+                    expected_run_id=_worker_run_id(tid), with_reason=True)
         except kb.ArtifactPreservationError as artifact_err:
             # Same contract as kanban_complete (#22923): the transition rolled
             # back, the task is untouched and retryable — say so explicitly or
@@ -913,7 +950,7 @@ def _handle_request_review(args: dict, **kw) -> str:
                 f"kanban_request_review with the same handoff.")
         _check(ok, f"could not request review for {tid}: "
                    f"{fail_reason or 'unknown id or not in running/ready'}")
-        return _ok_landed(kb, conn, tid, "review")
+        return _ok_landed(kb, conn, tid, "review", outcome_receipt_id=receipt_id)
 
 
 @_kanban_handler("kanban_request_changes")
@@ -941,7 +978,8 @@ def _handle_heartbeat(args: dict, **kw) -> str:
         # claimer covers locally-driven workers that bypassed the dispatcher.
         kb.heartbeat_claim(conn, tid, claimer=os.environ.get("HERMES_KANBAN_CLAIM_LOCK"))
         ok = kbd.heartbeat_worker(
-            conn, tid, note=args.get("note"), expected_run_id=_worker_run_id(tid))
+            conn, tid, note=args.get("note"), checkpoint=args.get("checkpoint"),
+            expected_run_id=_worker_run_id(tid))
         _check(ok, f"could not heartbeat {tid} (unknown id or not running)")
         return _ok(task_id=tid)
 

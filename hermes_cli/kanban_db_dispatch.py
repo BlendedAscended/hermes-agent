@@ -27,6 +27,9 @@ from typing import Optional
 from typing import TYPE_CHECKING
 
 from hermes_cli.quiet_single_query import KANBAN_WORKER_EXIT_TRAILER
+from hermes_cli.kanban_db_heartbeat import heartbeat_worker
+from hermes_cli.kanban_runtime_policy import default_max_runtime_seconds
+from hermes_cli import kanban_task_continuity as _continuity
 
 if TYPE_CHECKING:
     from hermes_cli.kanban_db import Task
@@ -608,46 +611,13 @@ def _defer_reclaim_for_live_worker(
         _kb._append_event(conn, task_id, "reclaim_deferred", payload, run_id=run_id)
 
 
-def heartbeat_worker(
-    conn: sqlite3.Connection,
-    task_id: str,
-    *,
-    note: Optional[str] = None,
-    expected_run_id: Optional[int] = None,
-) -> bool:
-    """Record a ``heartbeat`` event + touch ``last_heartbeat_at``.
-
-    Liveness signal orthogonal to the PID check: a worker whose forked child
-    (train loop, crawl) is stuck can still have a live Python process.
-    Returns False if the task is not running or its claim expired.
-    """
-    now = int(time.time())
-    with _kb.write_txn(conn):
-        sql = "UPDATE tasks SET last_heartbeat_at = ? WHERE id = ? AND status = 'running'"
-        params: tuple = (now, task_id)
-        if expected_run_id is not None:
-            sql += " AND current_run_id = ?"
-            params += (int(expected_run_id),)
-        cur = conn.execute(sql, params)
-        if cur.rowcount != 1:
-            return False
-        run_id = (
-            int(expected_run_id)
-            if expected_run_id is not None
-            else _kb._current_run_id(conn, task_id)
-        )
-        if run_id is not None:
-            conn.execute("UPDATE task_runs SET last_heartbeat_at = ? WHERE id = ?", (now, run_id))
-        _kb._append_event(
-            conn, task_id, "heartbeat",
-            {"note": note} if note else None,
-            run_id=run_id,
-        )
-    return True
+def _default_max_runtime_seconds() -> int:
+    """Compatibility wrapper for the validated per-attempt timeout policy."""
+    return default_max_runtime_seconds()
 
 
 def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str]:
-    """Terminate workers whose per-task ``max_runtime_seconds`` has elapsed.
+    """Terminate workers whose effective ``max_runtime_seconds`` has elapsed.
 
     SIGTERM, short grace, then SIGKILL. Emits ``timed_out`` and restores the
     task's source phase so the next tick re-spawns the same kind of worker —
@@ -658,15 +628,18 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
     now = int(time.time())
     host_prefix = _kb._host_prefix()
 
+    # Cards with no cap of their own inherit the fleet default, evaluated once per tick.
+    default_cap = _default_max_runtime_seconds()
     rows = conn.execute(
         "SELECT t.id, t.worker_pid, t.worker_started_at, "
-        "       COALESCE(r.started_at, t.started_at) AS active_started_at, "
-        "       t.max_runtime_seconds, t.claim_lock "
+        "       COALESCE(r.started_at, t.started_at) AS active_started_at, r.id AS active_run_id, "
+        "       COALESCE(t.max_runtime_seconds, :default_cap) AS max_runtime_seconds, t.claim_lock "
         "FROM tasks t "
         "LEFT JOIN task_runs r ON r.id = t.current_run_id "
-        "WHERE t.status = 'running' AND t.max_runtime_seconds IS NOT NULL "
+        "WHERE t.status = 'running' AND COALESCE(t.max_runtime_seconds, :default_cap) > 0 "
         "  AND COALESCE(r.started_at, t.started_at) IS NOT NULL "
-        "  AND t.worker_pid IS NOT NULL"
+        "  AND t.worker_pid IS NOT NULL",
+        {"default_cap": default_cap},
     ).fetchall()
     for row in rows:
         lock = row["claim_lock"] or ""
@@ -675,8 +648,8 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
         # Runtime is per attempt: ``tasks.started_at`` records the FIRST start,
         # so retries must be measured from the active task_runs row.
         elapsed = now - (_kb._to_epoch(row["active_started_at"]) or now)  # unreadable clock: never kill
-        limit = int(row["max_runtime_seconds"])
-        if elapsed < limit:
+        limit = int(row["max_runtime_seconds"] or 0)
+        if limit <= 0 or elapsed < limit:
             continue
 
         pid = int(row["worker_pid"])
@@ -703,6 +676,9 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
 
         error = f"elapsed {int(elapsed)}s > limit {limit}s"
         with _kb.write_txn(conn):
+            if row["active_run_id"] is not None and row["claim_lock"]:
+                _continuity.checkpoint_recovery(conn, tid, int(row["active_run_id"]), row["claim_lock"],
+                    error, "next_dispatch_tick_after_timeout")
             retry_status = _kb._retry_status_for_run(conn, tid)
             cur = conn.execute(
                 "UPDATE tasks SET status = ?, claim_lock = NULL, "
@@ -1149,7 +1125,7 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
     sweep = _CrashSweep()
     with _kb.write_txn(conn):
         rows = conn.execute(
-            "SELECT id, worker_pid, worker_started_at, claim_lock, started_at, assignee "
+            "SELECT id, worker_pid, worker_started_at, claim_lock, started_at, assignee, current_run_id "
             "FROM tasks "
             "WHERE status = 'running' AND worker_pid IS NOT NULL"
         ).fetchall()
@@ -1170,6 +1146,9 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
             dead = _classify_dead_worker(pid, row["claim_lock"], task_id=row["id"], board=board)
             retry_status = _kb._retry_status_for_run(conn, row["id"])
             dead.event_payload["retry_status"] = retry_status
+            if row["current_run_id"] is not None and row["claim_lock"]:
+                _continuity.checkpoint_recovery(conn, row["id"], int(row["current_run_id"]),
+                    row["claim_lock"], dead.error_text, "next_dispatch_tick_after_worker_exit")
             cur = conn.execute(
                 "UPDATE tasks SET status = ?, claim_lock = NULL, "
                 "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL "
@@ -2343,6 +2322,7 @@ def _dispatch_once_locked(
     the PID so later ticks catch crashes before the TTL. Cap semantics:
     :func:`_tick_spawn_budget`."""
     result = DispatchResult()
+    _continuity.reconcile_pending_outcomes(conn)
     _run_reclaim_phase(
         conn, result, stale_timeout_seconds=stale_timeout_seconds,
         failure_limit=failure_limit, reconcile_orphans=reconcile_orphans, board=board,

@@ -163,6 +163,25 @@ KANBAN_COMPLETE_SCHEMA = _schema(
                 "task in-flight so you can fix the path and retry."
             ),
         },
+        "outcome_receipt": {
+            "type": "object",
+            "description": "Required for dispatcher workers before complete or review. Bind verified local evidence to this task, run and input digest. Use external_effect_state=none only; unresolved external actions remain open.",
+            "required": ["version", "task_id", "run_id", "tenant", "input_sha256", "idempotency_key", "disposition", "external_effect_state", "verification", "evidence"],
+            "properties": {
+                "version": {"type": "integer", "enum": [1]},
+                "task_id": {"type": "string"},
+                "run_id": {"type": "integer"},
+                "tenant": {"type": ["string", "null"]},
+                "input_sha256": {"type": "string"},
+                "idempotency_key": {"type": "string"},
+                "disposition": {"type": "string", "enum": ["complete", "review"]},
+                "external_effect_state": {"type": "string", "enum": ["none"]},
+                "completed_steps": {"type": "array", "items": {"type": "string"}},
+                "verification": {"type": "object", "required": ["exit_code", "passed", "failed", "skipped", "evidence_path", "evidence_sha256"], "properties": {"exit_code": {"type": "integer"}, "passed": {"type": "integer"}, "failed": {"type": "integer"}, "skipped": {"type": "integer"}, "evidence_path": {"type": "string"}, "evidence_sha256": {"type": "string"}}, "additionalProperties": False},
+                "evidence": {"type": "array", "items": {"type": "object", "required": ["path", "sha256"], "properties": {"path": {"type": "string"}, "sha256": {"type": "string"}}, "additionalProperties": False}},
+            },
+            "additionalProperties": False,
+        },
     },
     [],
 )
@@ -271,6 +290,20 @@ KANBAN_REQUEST_REVIEW_SCHEMA = _schema(
                 "so you can fix the path and retry."
             ),
         },
+        "outcome_receipt": {
+            "type": "object", "description": "Required for dispatcher workers before review. Bind verified local evidence to this task, run and input digest. Ambiguous external actions cannot be handed off as complete.",
+            "required": ["version", "task_id", "run_id", "tenant", "input_sha256", "idempotency_key", "disposition", "external_effect_state", "verification", "evidence"],
+            "properties": {
+                "version": {"type": "integer", "enum": [1]}, "task_id": {"type": "string"},
+                "run_id": {"type": "integer"}, "tenant": {"type": ["string", "null"]},
+                "input_sha256": {"type": "string"}, "idempotency_key": {"type": "string"},
+                "disposition": {"type": "string", "enum": ["complete", "review"]},
+                "external_effect_state": {"type": "string", "enum": ["none"]},
+                "completed_steps": {"type": "array", "items": {"type": "string"}},
+                "verification": {"type": "object", "required": ["exit_code", "passed", "failed", "skipped", "evidence_path", "evidence_sha256"], "properties": {"exit_code": {"type": "integer"}, "passed": {"type": "integer"}, "failed": {"type": "integer"}, "skipped": {"type": "integer"}, "evidence_path": {"type": "string"}, "evidence_sha256": {"type": "string"}}, "additionalProperties": False},
+                "evidence": {"type": "array", "items": {"type": "object", "required": ["path", "sha256"], "properties": {"path": {"type": "string"}, "sha256": {"type": "string"}}, "additionalProperties": False}},
+            }, "additionalProperties": False,
+        },
     },
     ["summary"],
 )
@@ -308,6 +341,7 @@ KANBAN_HEARTBEAT_SCHEMA = _schema(
                 "Optional short note describing current progress. "
                 "Shown in the event log."
         )),
+        "checkpoint": {"type": "object", "description": "Optional task scoped progress: completed_steps, evidence path and digest, next_action, waiting_reason, pending_dependency, recovery_owner, recovery_trigger, and last_error.", "additionalProperties": True},
     },
     [],
 )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import pytest
 from hermes_cli import kanban as kc
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
+from hermes_cli.kanban_task_continuity import task_input_digest
 
 
 @pytest.fixture
@@ -37,8 +39,28 @@ def review_worker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> str:
 def test_review_tools_redact_handoff_and_route_changes(
     review_worker: str,
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     from tools import kanban_tools as tools
+
+    report = tmp_path / "review-verification.json"
+    report.write_text(json.dumps({"exit_code": 0, "passed": 1, "failed": 0, "skipped": 0}, sort_keys=True))
+    digest = hashlib.sha256(report.read_bytes()).hexdigest()
+    with kbc.connect() as conn:
+        task = kb.get_task(conn, review_worker)
+        assert task is not None and task.current_run_id is not None
+        assert task.claim_lock
+        monkeypatch.setenv("HERMES_KANBAN_CLAIM_LOCK", task.claim_lock)
+        receipt = {
+            "version": 1, "task_id": task.id, "run_id": task.current_run_id,
+            "tenant": task.tenant, "input_sha256": task_input_digest(conn, task.id),
+            "idempotency_key": f"{task.id}:{task.current_run_id}:review-test",
+            "disposition": "review", "external_effect_state": "none",
+            "completed_steps": ["implementation", "verification"],
+            "verification": {"exit_code": 0, "passed": 1, "failed": 0, "skipped": 0,
+                "evidence_path": str(report), "evidence_sha256": digest},
+            "evidence": [{"path": str(report), "sha256": digest}],
+        }
 
     secret = "ghp_" + "A" * 40
     requested = json.loads(
@@ -46,9 +68,10 @@ def test_review_tools_redact_handoff_and_route_changes(
             "summary": f"Ready; temporary token was {secret}",
             "metadata": {"token": secret, "tests_run": 7},
             "reviewer": "reviewer",
+            "outcome_receipt": receipt,
         })
     )
-    assert requested["ok"] is True
+    assert requested.get("ok") is True, requested
 
     with kbc.connect() as conn:
         task = kb.get_task(conn, review_worker)

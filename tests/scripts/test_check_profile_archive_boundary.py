@@ -55,3 +55,16 @@ def test_nested_profile_archive_is_also_rejected(tmp_path):
 
     assert result.returncode == 1
     assert "fixtures/fixture.tar.gz" in result.stdout
+
+
+def test_rebuildable_cache_archives_are_ignored_but_source_archives_fail(tmp_path):
+    cache = tmp_path / ".cache" / "tool" / "downloads"
+    cache.mkdir(parents=True)
+    (cache / "downloaded-profile.tgz").write_bytes(b"rebuildable cache artifact")
+    result = _run(tmp_path)
+    assert result.returncode == 0
+
+    (tmp_path / "source-fixture.tgz").write_bytes(b"source archive")
+    result = _run(tmp_path)
+    assert result.returncode == 1
+    assert "source-fixture.tgz" in result.stdout

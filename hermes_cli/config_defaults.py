@@ -1942,9 +1942,9 @@ DEFAULT_CONFIG = {
         # Max triage tasks decomposed per tick, bounding the aux-LLM burst from a bulk load. Excess
         # defers to the next tick.
         "auto_decompose_per_tick": 3,
-        # Running tasks with no heartbeat (last_heartbeat_at) for this many seconds are reclaimed to
-        # ready on the next tick; a still-running local worker is terminated first. 0 = off.
+        # Reclaim running tasks when their heartbeat is older than this; 0 disables the threshold.
         "dispatch_stale_timeout_seconds": 14400,
+        "default_max_runtime_seconds": 5400,
         # Each tick, requeue 'running' cards with broken claim bookkeeping (claim_lock or
         # claim_expires NULL with a dead worker) that TTL/crash/stale recovery can't see. False
         # keeps orphans frozen for manual forensics.

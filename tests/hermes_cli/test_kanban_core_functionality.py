@@ -945,7 +945,7 @@ def test_legacy_migration_no_legacy_columns_at_all(tmp_path):
 
 @pytest.mark.parametrize("corrupt_exc", ["sqlite", "guard"])
 def test_gateway_dispatcher_disables_corrupt_board_without_traceback(
-    monkeypatch, tmp_path, caplog, corrupt_exc
+    monkeypatch, tmp_path, caplog, corrupt_exc, hermes_bootstrap_isolated_manifest
 ):
     """Corrupt board DBs log one actionable error and stop retrying per tick."""
     import asyncio
@@ -1393,5 +1393,77 @@ def test_dead_worker_reap_reads_the_log_of_the_dispatching_board(kanban_home):
             kb._pid_alive = original_alive
         task = kb.get_task(conn, tid)
         assert "no reassignment operation" in (task.last_failure_error or "")
+    finally:
+        conn.close()
+
+
+def test_default_max_runtime_caps_a_card_created_without_one(kanban_home, monkeypatch):
+    """A card minted with no cap inherits kanban.default_max_runtime_seconds.
+
+    Cards created by ``auto_decompose`` never pass ``--max-runtime``, so the old gate
+    (``max_runtime_seconds IS NOT NULL``) could never terminate them. The fleet default
+    is the backstop that makes an uncapped card bounded anyway.
+    """
+    import hermes_cli.config as _cfg
+
+    monkeypatch.setattr(
+        _cfg, "load_config_readonly",
+        lambda: {"kanban": {"default_max_runtime_seconds": 1}},
+    )
+    killed = []
+    import hermes_cli.kanban_db as _kb
+    monkeypatch.setattr(_kb, "_pid_alive", lambda pid: False)
+
+    conn = kbc.connect()
+    try:
+        tid = kb.create_task(conn, title="uncapped job", assignee="worker")
+        assert kb.get_task(conn, tid).max_runtime_seconds is None
+        kb.claim_task(conn, tid)
+        kbd._set_worker_pid(conn, tid, os.getpid())
+        old_started = int(time.time()) - 30
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET started_at = ? WHERE id = ?", (old_started, tid))
+            conn.execute(
+                "UPDATE task_runs SET started_at = ? "
+                "WHERE id = (SELECT current_run_id FROM tasks WHERE id = ?)",
+                (old_started, tid),
+            )
+
+        timed_out = kbd.enforce_max_runtime(conn, signal_fn=lambda pid, sig: killed.append(pid))
+        assert tid in timed_out
+        assert killed == [os.getpid()]
+        assert kb.get_task(conn, tid).status == "ready"
+    finally:
+        conn.close()
+
+
+def test_default_max_runtime_zero_keeps_cards_uncapped(kanban_home, monkeypatch):
+    """0 keeps the legacy behaviour: an uncapped card is not killed."""
+    import hermes_cli.config as _cfg
+
+    monkeypatch.setattr(
+        _cfg, "load_config_readonly",
+        lambda: {"kanban": {"default_max_runtime_seconds": 0}},
+    )
+    killed = []
+    import hermes_cli.kanban_db as _kb
+    monkeypatch.setattr(_kb, "_pid_alive", lambda pid: False)
+
+    conn = kbc.connect()
+    try:
+        tid = kb.create_task(conn, title="uncapped job", assignee="worker")
+        kb.claim_task(conn, tid)
+        kbd._set_worker_pid(conn, tid, os.getpid())
+        old_started = int(time.time()) - 30
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET started_at = ? WHERE id = ?", (old_started, tid))
+            conn.execute(
+                "UPDATE task_runs SET started_at = ? "
+                "WHERE id = (SELECT current_run_id FROM tasks WHERE id = ?)",
+                (old_started, tid),
+            )
+
+        assert kbd.enforce_max_runtime(conn, signal_fn=lambda pid, sig: killed.append(pid)) == []
+        assert killed == []
     finally:
         conn.close()

@@ -60,15 +60,44 @@ def worker_env(monkeypatch, tmp_path):
     conn = kbc.connect()
     try:
         tid = kb.create_task(conn, title="worker-test", assignee="test-worker")
-        kb.claim_task(conn, tid)
+        claimed = kb.claim_task(conn, tid)
         run_id = kb._current_run_id(conn, tid)
+        claim_lock = claimed.claim_lock
     finally:
         conn.close()
     monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
     # A real dispatcher always pins the worker's run id; simulate that so the
     # run-lifecycle tools can prove ownership (see test_unbound_worker_cannot_mutate_card).
     monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
+    monkeypatch.setenv("HERMES_KANBAN_CLAIM_LOCK", claim_lock)
     return tid
+
+
+@pytest.fixture
+def worker_outcome_receipt(worker_env, tmp_path):
+    """Build a real task/run bound proof artifact for terminal tool tests."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli.kanban_task_continuity import task_input_digest
+    import hashlib
+
+    report = tmp_path / "worker-verification.json"
+    report.write_text(json.dumps({"command": "fixture proof", "exit_code": 0,
+        "passed": 1, "failed": 0, "skipped": 0}, sort_keys=True), encoding="utf-8")
+    digest = hashlib.sha256(report.read_bytes()).hexdigest()
+    with kbc.connect() as conn:
+        task = kb.get_task(conn, worker_env)
+        proof = {
+            "version": 1, "task_id": worker_env, "run_id": task.current_run_id,
+            "tenant": task.tenant, "input_sha256": task_input_digest(conn, worker_env),
+            "idempotency_key": f"{worker_env}:{task.current_run_id}:tool-test",
+            "disposition": "complete", "external_effect_state": "none",
+            "completed_steps": ["fixture proof"],
+            "verification": {"exit_code": 0, "passed": 1, "failed": 0, "skipped": 0,
+                "evidence_path": str(report), "evidence_sha256": digest},
+            "evidence": [{"path": str(report), "sha256": digest}],
+        }
+    return proof
 
 
 def test_show_defaults_to_env_task_id(worker_env):
@@ -173,11 +202,12 @@ def test_list_filters_tasks(monkeypatch, worker_env):
     assert tenant_ids == [c]
 
 
-def test_complete_happy_path(worker_env):
+def test_complete_happy_path(worker_env, worker_outcome_receipt):
     from tools import kanban_tools as kt
     out = kt._handle_complete({
         "summary": "got the thing done",
         "metadata": {"files": 2},
+        "outcome_receipt": worker_outcome_receipt,
     })
     d = json.loads(out)
     assert d["ok"] is True
@@ -195,7 +225,27 @@ def test_complete_happy_path(worker_env):
         conn.close()
 
 
-def test_complete_retry_with_empty_created_cards_succeeds(worker_env):
+def test_worker_completion_requires_valid_task_scoped_evidence(worker_env, worker_outcome_receipt):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+
+    missing = json.loads(kt._handle_complete({"summary": "unsupported handoff"}))
+    assert "outcome_receipt" in missing["error"]
+
+    corrupted = dict(worker_outcome_receipt)
+    corrupted["verification"] = dict(corrupted["verification"], evidence_sha256="0" * 64)
+    rejected = json.loads(kt._handle_complete({
+        "summary": "corrupted evidence must not close the task",
+        "outcome_receipt": corrupted,
+    }))
+    assert "digest mismatch" in rejected["error"]
+
+    with kbc.connect() as conn:
+        assert kb.get_task(conn, worker_env).status == "running"
+
+
+def test_complete_retry_with_empty_created_cards_succeeds(worker_env, worker_outcome_receipt):
     """After a phantom rejection, retrying kanban_complete with
     created_cards=[] (the documented escape hatch) must complete the
     task. Regression for #22923."""
@@ -214,6 +264,7 @@ def test_complete_retry_with_empty_created_cards_succeeds(worker_env):
     ok = json.loads(kt._handle_complete({
         "summary": "retry without claims",
         "created_cards": [],
+        "outcome_receipt": worker_outcome_receipt,
     }))
     assert ok.get("ok") is True
 
@@ -224,7 +275,7 @@ def test_complete_retry_with_empty_created_cards_succeeds(worker_env):
         conn.close()
 
 
-def test_complete_reports_registered_attachments(worker_env):
+def test_complete_reports_registered_attachments(worker_env, worker_outcome_receipt):
     """#117360: artifact staging is atomic with the completion write, so the
     worker's pre-completion `kanban_attachments` readback is always empty and
     workers narrated "registered at completion: none" even when the rows landed.
@@ -245,6 +296,7 @@ def test_complete_reports_registered_attachments(worker_env):
     out = kt._handle_complete({
         "summary": "done",
         "artifacts": [str(artifact)],
+        "outcome_receipt": worker_outcome_receipt,
     })
     d = json.loads(out)
     assert d["ok"] is True, d
@@ -279,7 +331,7 @@ def test_request_review_rejects_unknown_reviewer_without_mutation(monkeypatch, w
         assert kb.list_events(conn, worker_env) == before_events
 
 
-def test_request_review_accepts_installed_profile(monkeypatch, worker_env, tmp_path):
+def test_request_review_accepts_installed_profile(monkeypatch, worker_env, tmp_path, worker_outcome_receipt):
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
     from tools import kanban_tools as kt
@@ -289,7 +341,10 @@ def test_request_review_accepts_installed_profile(monkeypatch, worker_env, tmp_p
     with kbc.connect() as conn:
         monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(kb.get_task(conn, worker_env).current_run_id))
 
-    out = json.loads(kt._handle_request_review({"summary": "Ready for review.", "reviewer": "verifier"}))
+    receipt = dict(worker_outcome_receipt, disposition="review",
+        idempotency_key=f"{worker_env}:review-receipt")
+    out = json.loads(kt._handle_request_review({"summary": "Ready for review.", "reviewer": "verifier",
+        "outcome_receipt": receipt}))
 
     assert out["ok"] is True
     with kbc.connect() as conn:
@@ -297,7 +352,7 @@ def test_request_review_accepts_installed_profile(monkeypatch, worker_env, tmp_p
         assert (task.status, task.assignee) == ("review", "verifier")
 
 
-def test_unbound_worker_cannot_mutate_card(monkeypatch, worker_env):
+def test_unbound_worker_cannot_mutate_card(monkeypatch, worker_env, worker_outcome_receipt):
     """A dispatcher-spawned worker that cannot resolve its run id must be refused
     on every run-lifecycle mutation. ``expected_run_id=None`` would silently skip
     the run-ownership CAS in kanban_db, so an unbound stale worker could complete
@@ -331,7 +386,8 @@ def test_unbound_worker_cannot_mutate_card(monkeypatch, worker_env):
     with kbc.connect() as conn:
         run_id = kb.get_task(conn, worker_env).current_run_id
     monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
-    out = json.loads(kt._handle_complete({"summary": "bound worker done"}))
+    out = json.loads(kt._handle_complete({"summary": "bound worker done",
+        "outcome_receipt": worker_outcome_receipt}))
     assert out.get("ok") is True
     with kbc.connect() as conn:
         assert kb.get_task(conn, worker_env).status == "done"
@@ -855,7 +911,7 @@ def test_unblock_with_pending_parents_returns_todo(monkeypatch, tmp_path):
         conn.close()
 
 
-def test_worker_lifecycle_through_tools(worker_env):
+def test_worker_lifecycle_through_tools(worker_env, worker_outcome_receipt):
     """Drive the full claim -> heartbeat -> comment -> complete lifecycle
     exclusively through the tools, then verify the DB state matches what
     the dispatcher/notifier expect."""
@@ -886,6 +942,7 @@ def test_worker_lifecycle_through_tools(worker_env):
     comp = json.loads(kt._handle_complete({
         "summary": "implemented + spawned QA follow-up",
         "metadata": {"child_task": child_out["task_id"]},
+        "outcome_receipt": worker_outcome_receipt,
     }))
     assert comp["ok"]
 
@@ -1187,7 +1244,9 @@ def test_create_does_not_subscribe_in_cli_session(monkeypatch, worker_env):
     assert _list_subs_for_task(d["task_id"]) == []
 
 
-def test_create_tui_subscription_binds_to_live_session_after_compaction_fork(monkeypatch, worker_env, tmp_path):
+def test_create_tui_subscription_binds_to_live_session_after_compaction_fork(
+    monkeypatch, worker_env, tmp_path, hermes_bootstrap_isolated_manifest
+):
     """#110068: the inherited HERMES_SESSION_KEY can name a session already superseded
     by a compaction fork. Auto-subscribe must bind to the live continuation tip resolved
     from the session store, not the stale key the process was launched with."""
@@ -1224,7 +1283,7 @@ def test_create_tui_subscription_binds_to_live_session_after_compaction_fork(mon
     assert subs[0]["chat_id"] == live
 
 
-def test_live_tui_session_key_uses_profile_store(monkeypatch, tmp_path):
+def test_live_tui_session_key_uses_profile_store(monkeypatch, tmp_path, hermes_bootstrap_isolated_manifest):
     """A named-profile session's lineage lives in profiles/<x>/state.db, not the default
     store: resolution must open THAT store."""
     from hermes_cli import profiles as profiles_mod

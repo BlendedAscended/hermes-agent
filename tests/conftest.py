@@ -35,6 +35,26 @@ PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+
+@pytest.fixture
+def hermes_bootstrap_isolated_manifest(tmp_path, monkeypatch):
+    """Route source-checkout bootstrap manifest reads into a disposable install tree."""
+    import json
+    from pm import environments
+
+    fake_repo = tmp_path / "isolated-bootstrap" / "hermes-agent"
+    fake_repo.mkdir(parents=True)
+    manifest = {
+        "repo": fake_repo.name, "venv": "", "store": "",
+        "runtime": {"commands": {"hermes": ""}},
+    }
+    (fake_repo.parent / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    real_resolver = environments._payload_manifest
+    source_repo = PROJECT_ROOT.resolve()
+    monkeypatch.setattr(environments, "_payload_manifest", lambda root:
+        real_resolver(fake_repo if Path(root).resolve() == source_repo else root))
+    return fake_repo.parent
+
 # Every test file runs in its own process, and in a checkout without an install stamp
 # get_version_info() shells out to git 7 times (~0.55 s per process in a large local
 # clone; a whole local suite run spent ~48 CPU-minutes there). Seed the shape a shallow
