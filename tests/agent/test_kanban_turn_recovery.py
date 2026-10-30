@@ -47,6 +47,14 @@ KANBAN_ENV = (
     "HERMES_KANBAN_BOARD",
 )
 
+
+@pytest.fixture(autouse=True)
+def isolate_bootstrap_manifest(hermes_bootstrap_isolated_manifest):
+    """Keep entry-point imports away from the installed home manifest."""
+
+#: The two one-shot routes sharing the exit decision: production ``chat -q`` and quiet ``-Q``.
+DRIVERS = ("chat", "quiet")
+
 #: Any "live" lease for these tests (2100-01-01 UTC).
 _FAR_FUTURE_EXPIRY = 4_102_444_800
 

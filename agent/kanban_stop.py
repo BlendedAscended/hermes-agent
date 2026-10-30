@@ -8,7 +8,13 @@ instead of exiting.
 
 from __future__ import annotations
 
+from contextlib import closing
+import json
+import logging
 import os
+from pathlib import Path
+import sqlite3
+import time
 from typing import Any, Iterable, Optional
 
 from agent.delegation_context import owned_kanban_task
@@ -28,6 +34,7 @@ _TERMINAL_KANBAN_TOOLS = frozenset({
 })
 
 _DEFAULT_MAX_ATTEMPTS = 2
+logger = logging.getLogger(__name__)
 
 
 def kanban_stop_nudge_enabled() -> bool:
@@ -39,26 +46,109 @@ def kanban_stop_nudge_enabled() -> bool:
     return bool(owned_kanban_task())
 
 
-def _tool_call_name(tc: Any) -> str:
-    """Tool name from a dict or object tool call (``function.name`` first, then ``name``)."""
-    if isinstance(tc, dict):
-        fn = tc.get("function")
-        return str((fn.get("name") if isinstance(fn, dict) else tc.get("name")) or "")
-    fn = getattr(tc, "function", None)
-    return str((getattr(fn, "name", "") if fn is not None else getattr(tc, "name", "")) or "")
+def _tool_result_payload(msg: dict) -> Optional[dict]:
+    """Parsed kanban tool result, or ``None`` when it is not a JSON object.
+
+    Kanban handlers return ``json.dumps({"ok": True, ...})`` on success and
+    ``json.dumps({"error": ...})`` on every rejection (``tools/registry.py``).
+    A tool call alone is not proof: the call may have been rejected for
+    unsatisfied parents, phantom ``created_cards``, a stale run, or a goal
+    judge veto, leaving the card ``running``.
+    """
+    content = msg.get("content")
+    if isinstance(content, dict):
+        return content
+    if isinstance(content, str):
+        try:
+            payload = json.loads(content)
+        except (TypeError, ValueError):
+            return None
+        return payload if isinstance(payload, dict) else None
+    return None
 
 
-def session_called_kanban_terminal(messages: Iterable[dict] | None) -> bool:
-    """True if this conversation already invoked a terminal kanban tool."""
+def _call_identity(call: Any) -> tuple[str, str]:
+    """Retain SDK object support as well as persisted dict tool calls."""
+    if isinstance(call, dict):
+        function = call.get("function")
+        name = function.get("name") if isinstance(function, dict) else call.get("name")
+        return str(call.get("id") or ""), str(name or "")
+    function = getattr(call, "function", None)
+    name = getattr(function, "name", "") if function is not None else getattr(call, "name", "")
+    return str(getattr(call, "id", "") or ""), str(name or "")
+
+
+def session_called_kanban_terminal(
+    messages: Iterable[dict] | None, task_id: Optional[str] = None,
+    *, run_id: Optional[str] = None,
+) -> bool:
+    """Require a paired successful lifecycle result for the exact owned task/run."""
+    calls: dict[str, str] = {}
     for msg in filter(lambda m: isinstance(m, dict), messages or ()):
-        role = msg.get("role")
-        if role == "assistant" and any(
-            _tool_call_name(tc) in _TERMINAL_KANBAN_TOOLS for tc in msg.get("tool_calls") or []
-        ):
-            return True
-        if role == "tool" and str(msg.get("name") or "") in _TERMINAL_KANBAN_TOOLS:
-            return True
+        if msg.get("role") == "assistant":
+            for call in msg.get("tool_calls") or ():
+                call_id, name = _call_identity(call)
+                if call_id:
+                    calls[call_id] = name
+            continue
+        if msg.get("role") != "tool":
+            continue
+        name = calls.pop(str(msg.get("tool_call_id") or ""), "")
+        if name not in _TERMINAL_KANBAN_TOOLS:
+            continue
+        result_name = msg.get("name") or msg.get("tool_name")
+        if result_name and result_name != name:
+            continue
+        payload = _tool_result_payload(msg)
+        if payload is None or payload.get("ok") is not True or payload.get("error"):
+            continue
+        acknowledged = payload.get("task_id")
+        if not acknowledged or (task_id and str(acknowledged) != task_id):
+            continue
+        if run_id and str(payload.get("run_id")) != run_id:
+            continue
+        return True
     return False
+
+
+def _pinned_run_released(task_id: str) -> Optional[bool]:
+    """Read only the pinned run: True released, False still owned, None unknown.
+
+    Lost transcript acknowledgments must not restart a settled or superseded
+    worker. Missing pins or failed reads do not prove a successful handoff.
+    """
+    db_path = (os.environ.get("HERMES_KANBAN_DB") or "").strip()
+    run_id = (os.environ.get("HERMES_KANBAN_RUN_ID") or "").strip()
+    claim_lock = (os.environ.get("HERMES_KANBAN_CLAIM_LOCK") or "").strip()
+    if not all((db_path, run_id, claim_lock)):
+        return None
+    try:
+        uri = f"{Path(db_path).absolute().as_uri()}?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True, timeout=0.25)) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT t.status, t.current_run_id, t.claim_lock, t.claim_expires, "
+                "t.worker_pid, r.id AS run_id, r.outcome, r.ended_at, "
+                "r.claim_expires AS run_expires, r.worker_pid AS run_pid "
+                "FROM tasks t LEFT JOIN task_runs r ON r.id = ? AND r.task_id = t.id "
+                "WHERE t.id = ?", (int(run_id), task_id),
+            ).fetchone()
+        if row is None or row["run_id"] is None:
+            return None
+        if (row["status"] != "running" or str(row["current_run_id"]) != run_id
+                or row["ended_at"] is not None or row["outcome"] is not None
+                or row["claim_lock"] != claim_lock):
+            return True
+        expiries = (row["claim_expires"], row["run_expires"])
+        if any(expiry is None for expiry in expiries):
+            return None
+        if min(int(expiry) for expiry in expiries) < int(time.time()):
+            return True
+        pids = (row["worker_pid"], row["run_pid"])
+        return any(pid is not None and int(pid) != os.getpid() for pid in pids)
+    except (sqlite3.Error, OSError, ValueError):
+        logger.warning("kanban stop guard could not verify pinned run ownership", exc_info=True)
+        return None
 
 
 def build_kanban_stop_nudge(
@@ -70,23 +160,35 @@ def build_kanban_stop_nudge(
 ) -> Optional[str]:
     """Synthetic follow-up when a kanban worker exits without a terminal tool; ``None`` when
     the guard should not fire (not a kanban worker, already completed/blocked, budget exhausted)."""
+    owned_tid = (task_id or os.environ.get("HERMES_KANBAN_TASK") or "").strip()
     if (
         not kanban_stop_nudge_enabled()
         or attempts >= max_attempts
-        or session_called_kanban_terminal(messages)
     ):
         return None
 
-    tid = (task_id or os.environ.get("HERMES_KANBAN_TASK") or "").strip() or "this task"
-    # The transcript is the status source: this text is only reached when the session made no
-    # handoff call, so it never tells a worker to close a card it already sent to review.
+    released = _pinned_run_released(owned_tid)
+    if released is True:
+        return None
+    run_id = (os.environ.get("HERMES_KANBAN_RUN_ID") or "").strip()
+    if released is None and session_called_kanban_terminal(
+        messages, owned_tid or None, run_id=run_id or None,
+    ):
+        return None
+
+    tid = owned_tid or "this task"
     return (
         "[System: You are a Hermes kanban worker. A plain-text reply is NOT a "
         "terminal state for the board.\n\n"
-        f"Task `{tid}` has not been handed off: this session made no terminal board "
-        "call (`kanban_complete` / `kanban_request_review` / `kanban_block`). Ending now "
-        "causes a protocol violation (clean exit with the card still `running`).\n\n"
-        "Do this immediately in your next response — do not narrate intent:\n"
+        f"Task `{tid}` has not been handed off: this session has no successful "
+        "terminal board call (`kanban_complete` / `kanban_request_review` / "
+        "`kanban_block`). A call that returned an error did not move the card; if "
+        "your last handoff was rejected, fix what the error named and retry it. "
+        "Ending now causes a protocol violation (clean exit with the card still "
+        "`running`).\n\n"
+        "Check `kanban_show` before retrying: if this run no longer owns the card, "
+        "stop without changing the successor's task. Otherwise, do this in your next "
+        "response instead of narrating intent:\n"
         "1. Finish any remaining deliverable (write the required file(s) now).\n"
         "2. Call `kanban_complete(summary=..., artifacts=[...])` if the work is done "
         "and needs no review, `kanban_request_review(summary=...)` if it is a code "
