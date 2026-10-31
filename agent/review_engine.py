@@ -13,7 +13,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import subprocess
+import sys
+import tempfile
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -136,6 +140,77 @@ def build_review_task(snapshot: list[dict[str, str]], user_prompt: str = "", loa
     return goal, "\n".join(lines)
 
 
+# Optional per-packet reviewer model pick (Jev confidence + top1/top2 margin gate).
+# The static ``auxiliary.review`` pin stays the fallback: any failure, refusal or
+# low-confidence verdict leaves the pre-existing routing untouched.
+JEV_REVIEW_PICK_SCRIPT = os.path.expanduser("~/.hermes/scripts/review-lane-pick.py")
+JEV_REVIEW_PICK_TIMEOUT_S = 25
+_JEV_PACKET_CHAR_CAP = 24_000
+# Only these verdicts may change routing. ``below_confidence_floor_default``,
+# ``unknown_choice_default``, ``empty_answers_default``, ``packet_not_reviewable``
+# and ``decision_error_default`` all keep the static pin (or parent inheritance),
+# so an unsure gate can never cheapen a review.
+_JEV_OVERRIDE_REASONS = frozenset({"jev_confirmed", "thin_margin_escalated"})
+
+
+def _jev_review_pick(goal: str, context: str) -> Optional[dict[str, Any]]:
+    """Ask the Jev reviewer-lane gate which model this packet needs. Never raises."""
+    try:
+        if not os.path.exists(JEV_REVIEW_PICK_SCRIPT):
+            return None
+        packet = f"{goal}\n\n{context}"[:_JEV_PACKET_CHAR_CAP]
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as handle:
+            handle.write(packet)
+            state_file = handle.name
+        try:
+            proc = subprocess.run(
+                [
+                    sys.executable, JEV_REVIEW_PICK_SCRIPT,
+                    "--state-file", state_file,
+                    "--run-id", os.environ.get("HERMES_DELEGATION_RUN_ID", "review"),
+                ],
+                check=False, capture_output=True, text=True, timeout=JEV_REVIEW_PICK_TIMEOUT_S,
+            )
+        finally:
+            try:
+                os.unlink(state_file)
+            except OSError:
+                pass
+        if proc.returncode != 0:
+            logger.info("jev review pick failed: %s", (proc.stderr or "").strip()[:200])
+            return None
+        pick = json.loads(proc.stdout)
+        if not isinstance(pick, dict) or not pick.get("model"):
+            return None
+        return pick
+    except Exception as exc:  # gate is advisory; routing must survive it
+        logger.info("jev review pick unavailable: %s", exc)
+        return None
+
+
+def _apply_jev_review_model(
+    credentials_cfg: Optional[dict[str, Any]], goal: str, context: str,
+) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]:
+    """Overlay the gated model onto the delegation credentials, or leave them alone.
+
+    The picked models all live on OpenRouter, so an accepted pick also pins that
+    provider and clears any inherited base_url/api_key/api_mode, otherwise the new
+    model id would be sent to the parent's native endpoint.
+    """
+    pick = _jev_review_pick(goal, context)
+    if not pick or pick.get("reason") not in _JEV_OVERRIDE_REASONS:
+        return credentials_cfg, None
+    cfg = dict(credentials_cfg or {})
+    cfg.update({
+        "provider": "openrouter",
+        "model": str(pick["model"]),
+        "base_url": "",
+        "api_key": "",
+        "api_mode": "",
+    })
+    return cfg, pick
+
+
 def _load_review_credentials_cfg() -> Optional[dict[str, Any]]:
     """``auxiliary.review`` as a delegation-credentials dict, or None when unconfigured (provider auto/empty
     and no model/base_url) so the reviewer inherits the parent's credentials."""
@@ -166,6 +241,7 @@ def start_review(parent_agent, messages: list[dict[str, Any]], user_prompt: str 
         raise ValueError("Nothing to review yet — the conversation is empty.")
     goal, context = build_review_task(snapshot, user_prompt, collect_parent_loaded_skills(parent_agent, messages))
     credentials_cfg = _load_review_credentials_cfg()
+    credentials_cfg, jev_pick = _apply_jev_review_model(credentials_cfg, goal, context)
 
     from tools.delegate_tool import delegate_task
     raw = delegate_task(goal=goal, context=context, background=True, parent_agent=parent_agent, credentials_cfg=credentials_cfg)
@@ -178,6 +254,14 @@ def start_review(parent_agent, messages: list[dict[str, Any]], user_prompt: str 
     if not isinstance(result, dict):
         raise ValueError(f"Review dispatch failed: {raw!r}")
     result.setdefault("review_model", (credentials_cfg or {}).get("model") or "")
+    if jev_pick:
+        result["review_model_pick"] = {
+            "model": jev_pick.get("model"),
+            "reason": jev_pick.get("reason"),
+            "confidence": jev_pick.get("confidence"),
+            "margin": jev_pick.get("margin_ratio"),
+            "second_reviewer": jev_pick.get("second_reviewer"),
+        }
     return result
 
 
