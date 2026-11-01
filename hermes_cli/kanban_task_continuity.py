@@ -75,11 +75,26 @@ def _task_run(conn: sqlite3.Connection, task_id: str, run_id: int):
     ).fetchone()
 
 
+def _norm_tenant(value: Any) -> Any:
+    """Normalize the string spellings of an empty tenant to None.
+
+    A task with `tenant IS NULL` must be receipted with a bare JSON null. Some
+    models serialize that as the string "null"/"None" instead, which then fails
+    the ownership check on a card whose work is already finished. Treat the
+    string spellings of "no tenant" as no tenant.
+    """
+    if isinstance(value, str):
+        text = value.strip()
+        if text == "" or text.lower() in {"null", "none", "nil", "undefined"}:
+            return None
+    return value
+
+
 def _verify_owner(conn: sqlite3.Connection, task_id: str, run_id: int, tenant: Any, token: str):
     row = _task_run(conn, task_id, run_id)
     if row is None or row["status"] != "running" or row["current_run_id"] != int(run_id):
         raise OutcomeReceiptError("receipt task/run is not the active run")
-    if row["tenant"] != tenant:
+    if _norm_tenant(row["tenant"]) != _norm_tenant(tenant):
         raise OutcomeReceiptError("receipt tenant does not match the task")
     if not token or row["claim_lock"] != token or row["run_lock"] != token:
         raise OutcomeReceiptError("receipt claim token is stale or does not own the active run")
