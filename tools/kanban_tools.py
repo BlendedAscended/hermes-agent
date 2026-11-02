@@ -758,7 +758,14 @@ def _handle_complete(args: dict, **kw) -> str:
     artifacts = _coerce_str_list(args.get("artifacts"), "artifacts", "file paths", strip=True)
     if artifacts:
         metadata = _merge_artifacts(metadata, artifacts)
-    _check(summary or result, "provide at least one of: summary (preferred), result")
+    if not (summary or result):
+        if isinstance(args.get("outcome_receipt"), dict):
+            # The receipt is the audit trail, NOT the handoff. Say which field is
+            # missing and why, instead of the generic summary-or-result error that
+            # sent workers on 25-attempt diagnostic detours (see t_1c17447b).
+            _check(False, "summary is required even when outcome_receipt is supplied; "
+                    "the receipt is the audit trail, the summary is the human-readable handoff")
+        _check(summary or result, "provide at least one of: summary (preferred), result")
     _require_dict_metadata(metadata)
     metadata = _stamp_worker_session_metadata(tid, metadata)
     with _board(args.get("board")) as (kb, conn):
