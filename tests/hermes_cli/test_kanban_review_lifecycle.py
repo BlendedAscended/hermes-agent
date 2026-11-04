@@ -649,6 +649,9 @@ def test_review_dispatch_preserves_task_skills_and_adds_reviewer_skill(
 
     def spawn(task, workspace):
         captured.append(list(task.skills or []))
+        # A spawner must report the pid it placed. Returning None now means the
+        # dispatcher releases the claim instead of leaving a ghost running card.
+        return 4242
 
     with kbc.connect() as conn:
         task_id = kb.create_task(
