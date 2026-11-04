@@ -2098,8 +2098,19 @@ def _dispatch_lane_task(
         claimed.skills = list(dict.fromkeys([*(claimed.skills or []), "sdlc-review"]))
     try:
         pid = _call_spawn_fn(spawn_fn if spawn_fn is not None else _default_spawn, claimed, str(workspace), board)
-        if pid:
-            _set_worker_pid(conn, claimed.id, int(pid))
+        if not pid:
+            # A spawn that returns no pid placed no worker. Reporting it as
+            # spawned leaves the card `running` with a NULL worker_pid until its
+            # claim expires, and `detect_crashed_workers` filters on
+            # `worker_pid IS NOT NULL`, so nothing reclaims it early. Measured
+            # twice on 2026-11-03 (t_8654c5bb, t_0e4c83ae).
+            _record_task_failure(
+                conn, claimed.id, "spawn returned no pid",
+                outcome="spawn_failed", failure_limit=failure_limit,
+                release_claim=True, end_run=True, infrastructure=True,
+            )
+            return False
+        _set_worker_pid(conn, claimed.id, int(pid))
         # Fires AFTER the PID (when reported) is durably persisted. Best-effort.
         _kb._fire_worker_spawned_hook(conn, claimed, str(workspace), pid, board=board)
         # consecutive_failures is deliberately NOT reset here: resetting on
