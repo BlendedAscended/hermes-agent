@@ -106,6 +106,45 @@ def test_missing_path_never_raises(tmp_path):
     assert state["is_checkout"] is False
 
 
+def test_missing_path_under_a_repo_is_not_a_checkout(repo):
+    """A pruned ``<repo>/.worktrees/<id>`` must not inherit its parent's ``.git``.
+
+    This is the layout of every ``worktree`` card. Substituting the nearest
+    existing ancestor answered ``exists=False`` next to ``is_checkout=True`` and
+    ``toplevel=<parent repo>`` — a confident "you have a checkout" about a path
+    that is not on disk, and the reason the missing-checkout warning stayed
+    silent for exactly the cards it exists for.
+    """
+    from hermes_cli.kanban_db_workspace import workspace_checkout_state
+
+    (repo / ".worktrees").mkdir()
+    gone = repo / ".worktrees" / "t_gone"
+    assert not gone.exists()
+
+    state = workspace_checkout_state(gone)
+
+    assert state["exists"] is False
+    assert state["is_checkout"] is False
+    assert state["own_checkout"] is False
+    assert state["toplevel"] is None
+
+
+def test_gitless_dir_under_worktrees_is_inside_a_repo_but_not_its_own_checkout(repo):
+    """An empty leftover directory is still not a work tree of its own."""
+    from hermes_cli.kanban_db_workspace import workspace_checkout_state
+
+    stale = repo / ".worktrees" / "t_stale"
+    stale.mkdir(parents=True)
+
+    state = workspace_checkout_state(stale)
+
+    assert state["exists"] is True
+    assert state["entries"] == 0
+    assert state["is_checkout"] is True  # it does sit inside the parent repo
+    assert state["own_checkout"] is False  # but it carries no ``.git`` of its own
+    assert state["toplevel"] == str(repo)
+
+
 # --- what the worker is told -------------------------------------------------
 
 
@@ -157,6 +196,60 @@ def test_dir_kind_that_is_not_a_checkout_is_a_warning(tmp_path):
     assert "origin/main" in note  # branch fallback when the task carries none
 
 
+def test_pruned_worktree_inside_a_repo_is_a_warning(repo):
+    """The case the whole card is about: ``<repo>/.worktrees/<id>`` gone.
+
+    The path sits inside its parent repo, so an ancestor-based answer reported
+    it healthy and returned no note. A ``worktree`` card is judged on the path
+    itself.
+    """
+    from hermes_cli.kanban_db_workspace import workspace_contract_note
+
+    (repo / ".worktrees").mkdir()
+    note = workspace_contract_note(
+        "worktree", repo / ".worktrees" / "t_gone", branch="wt/t_gone")
+
+    assert note is not None
+    assert "worktree" in note
+    assert "missing" in note
+    assert "wt/t_gone" in note
+
+
+def test_stale_empty_dir_under_worktrees_is_a_warning(repo):
+    from hermes_cli.kanban_db_workspace import workspace_contract_note
+
+    stale = repo / ".worktrees" / "t_stale"
+    stale.mkdir(parents=True)
+
+    note = workspace_contract_note("worktree", stale)
+
+    assert note is not None
+    assert "not a git work tree" in note
+
+
+def test_real_linked_worktree_is_silent(repo):
+    from hermes_cli.kanban_db_workspace import workspace_contract_note
+
+    wt = repo / ".worktrees" / "t_ok"
+    wt.parent.mkdir(parents=True)
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", str(wt)], check=True)
+
+    try:
+        assert workspace_contract_note("worktree", wt) is None
+    finally:
+        subprocess.run(["git", "-C", str(repo), "worktree", "remove", str(wt)], check=True)
+
+
+def test_dir_kind_inside_a_repo_stays_silent(repo):
+    """The ancestor walk is still the right test for ``dir`` — only for ``dir``."""
+    from hermes_cli.kanban_db_workspace import workspace_contract_note
+
+    shared = repo / "shared"
+    shared.mkdir()
+
+    assert workspace_contract_note("dir", shared) is None
+
+
 # --- the header the worker actually reads ------------------------------------
 
 
@@ -201,6 +294,18 @@ def test_worker_context_stays_quiet_for_a_real_checkout(kanban_home, repo):
 
     assert "SCRATCH PAD" not in text
     assert "Workspace warning" not in text
+
+
+def test_worker_context_warns_about_a_pruned_worktree(kanban_home, repo):
+    """The header a worker actually reads must carry the warning, not silence."""
+    from hermes_cli import kanban_db as kb
+
+    (repo / ".worktrees").mkdir()
+    text = _worker_context(
+        kb, workspace_kind="worktree", workspace_path=str(repo / ".worktrees" / "t_gone"))
+
+    assert "Workspace warning" in text
+    assert "missing" in text
 
 
 # --- the env the dispatcher hands the worker --------------------------------
@@ -265,3 +370,31 @@ def test_spawn_env_says_a_worktree_is_a_checkout(repo, tmp_path, monkeypatch):
     assert env["HERMES_KANBAN_WORKSPACE_KIND"] == "worktree"
     assert env["HERMES_KANBAN_WORKSPACE_IS_CHECKOUT"] == "1"
     assert env["HERMES_KANBAN_WORKSPACE_TOPLEVEL"] == str(repo)
+
+
+def test_spawn_env_refuses_a_pruned_worktree(repo, tmp_path, monkeypatch):
+    """A worktree card whose checkout is gone must never be told it has one."""
+    from hermes_cli import kanban_db as kb
+
+    _isolate_home(monkeypatch, tmp_path)
+    (repo / ".worktrees").mkdir()
+    gone = repo / ".worktrees" / "t_gone"
+
+    env = _capture_spawn_env(kb, monkeypatch, str(gone), kind="worktree")
+
+    assert env["HERMES_KANBAN_WORKSPACE_KIND"] == "worktree"
+    assert env["HERMES_KANBAN_WORKSPACE_IS_CHECKOUT"] == "0"
+    assert "HERMES_KANBAN_WORKSPACE_TOPLEVEL" not in env
+
+
+def test_spawn_env_refuses_a_gitless_dir_under_worktrees(repo, tmp_path, monkeypatch):
+    from hermes_cli import kanban_db as kb
+
+    _isolate_home(monkeypatch, tmp_path)
+    stale = repo / ".worktrees" / "t_stale"
+    stale.mkdir(parents=True)
+
+    env = _capture_spawn_env(kb, monkeypatch, str(stale), kind="worktree")
+
+    assert env["HERMES_KANBAN_WORKSPACE_IS_CHECKOUT"] == "0"
+    assert "HERMES_KANBAN_WORKSPACE_TOPLEVEL" not in env

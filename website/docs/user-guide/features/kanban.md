@@ -163,6 +163,16 @@ the directory disagree — a `scratch` pad with no repo gets an explicit
 "this is a scratch pad, not a checkout" note, and a `dir`/`worktree` card whose
 checkout is missing gets a warning instead of silence.
 
+Two rules keep that warning honest, and both are judged on the path itself:
+
+* a path that does not exist is **never** a checkout — a pruned
+  `<repo>/.worktrees/<id>` is not "inside the parent repo" for this purpose, so
+  it reports `is_checkout=0` and warns;
+* a `worktree` card is a checkout only when **its own** `.git` is there. A
+  leftover empty directory under `.worktrees/` is still a fault, not a
+  checkout — only `dir` accepts "inside a repo" as good enough, which is what
+  that row of the table above means.
+
 Why `scratch` is not auto-upgraded to the board repo: scratch cards are
 deliberately repo-less (a decision card, a verdict, a review, an ops sweep has no
 repository), and materializing the board's `default_workdir` for every one of

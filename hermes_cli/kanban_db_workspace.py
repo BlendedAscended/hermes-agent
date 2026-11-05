@@ -335,10 +335,22 @@ def _managed_scratch_path_info(p: Path) -> tuple[bool, Optional[str]]:
 def workspace_checkout_state(path: Path | str | None) -> dict:
     """What a worker will actually FIND at its workspace path.
 
-    ``{"exists", "entries", "is_checkout", "toplevel"}``. ``is_checkout`` is True
-    when ``path`` or one of its ancestors carries a ``.git`` entry — a directory
-    for a normal checkout, a file for a linked worktree. ``toplevel`` is the
-    repo root that made it True (``path`` itself for a repo root).
+    ``{"exists", "entries", "is_checkout", "own_checkout", "toplevel"}``.
+
+    ``is_checkout`` is True when ``path`` is a git work tree — itself or because
+    it sits inside one (the ancestor walk that the ``dir`` kind needs, since a
+    shared directory "is a checkout only if it happens to be inside one").
+    ``own_checkout`` is True only when ``path`` ITSELF carries a ``.git`` entry —
+    a directory for a normal checkout, a file for a linked worktree — which is
+    what the ``worktree`` kind promises by definition. ``toplevel`` is the
+    directory that made either True.
+
+    A path that does not exist is NEVER a checkout. Answering with the nearest
+    existing ancestor's ``.git`` was the defect this replaces: for the canonical
+    ``worktree`` layout ``<repo>/.worktrees/<id>`` a pruned or never-created
+    checkout sits inside its parent repo, so the ancestor walk reported
+    ``exists=False`` together with ``is_checkout=True`` and no warning fired —
+    a worker was confidently told it had a checkout at a path not on disk.
 
     A directory walk, NOT ``git rev-parse``: this is called while building the
     worker header (every ``kanban_show``, every spawn), so a subprocess on the
@@ -347,19 +359,26 @@ def workspace_checkout_state(path: Path | str | None) -> dict:
     Never raises. A missing or unreadable path reports ``exists=False`` /
     ``is_checkout=False`` instead of killing the header a worker needs to start.
     """
-    state = {"exists": False, "entries": 0, "is_checkout": False, "toplevel": None}
+    state = {
+        "exists": False, "entries": 0, "is_checkout": False,
+        "own_checkout": False, "toplevel": None,
+    }
     if not path:
         return state
     try:
         p = Path(path).expanduser()
         state["exists"] = p.is_dir()
-        if state["exists"]:
-            with contextlib.suppress(OSError):
-                state["entries"] = sum(1 for _ in p.iterdir())
-        current = p if state["exists"] else _nearest_existing_path(p)
+        if not state["exists"]:
+            # Absent (or not a directory): there is no checkout HERE, and no
+            # ancestor may stand in for it.
+            return state
+        with contextlib.suppress(OSError):
+            state["entries"] = sum(1 for _ in p.iterdir())
+        current = p
         while True:
             if (current / ".git").exists():
                 state["is_checkout"] = True
+                state["own_checkout"] = current == p
                 state["toplevel"] = str(current)
                 return state
             if current == current.parent:
@@ -367,6 +386,19 @@ def workspace_checkout_state(path: Path | str | None) -> dict:
             current = current.parent
     except OSError:
         return state
+
+
+def _kind_is_satisfied(kind: Optional[str], state: dict) -> bool:
+    """Whether ``state`` honours the checkout ``kind`` promises.
+
+    ``worktree`` is strict: the path itself must be a work tree, because that is
+    what the kind means and what the docs promise. ``dir``'s ancestor walk is
+    the correct test there, and ``scratch`` makes no promise of a checkout at
+    all (it is silent only when one happens to be there).
+    """
+    if (kind or "scratch").strip() == "worktree":
+        return bool(state["own_checkout"])
+    return bool(state["is_checkout"])
 
 
 # The contract every worker reads, so nobody has to infer what a workspace is.
@@ -403,13 +435,16 @@ def workspace_contract_note(
     * a ``scratch`` pad with no repository — the normal case, and the one three
       runs were burned guessing about on 2026-11-04 (t_2da84d09);
     * a ``dir``/``worktree`` card whose checkout is gone or never existed, which
-      is a real fault and must be reported as one.
+      is a real fault and must be reported as one. ``worktree`` is judged on the
+      path ITSELF: a pruned ``<repo>/.worktrees/<id>`` sits inside its parent
+      repo, so honouring the ancestor's ``.git`` there would report a broken
+      checkout as healthy and stay silent — the exact failure this warns about.
     """
     kind = (kind or "scratch").strip() or "scratch"
     state = workspace_checkout_state(path)
     if kind == "scratch":
-        return None if state["is_checkout"] else SCRATCH_PAD_NOTE
-    if state["is_checkout"]:
+        return None if _kind_is_satisfied(kind, state) else SCRATCH_PAD_NOTE
+    if _kind_is_satisfied(kind, state):
         return None
     problem = "missing" if not state["exists"] else "not a git work tree"
     return MISSING_CHECKOUT_NOTE.format(
@@ -432,7 +467,10 @@ def publish_workspace_env(env: dict, kind: Optional[str], workspace: Path | str 
 
     * ``HERMES_KANBAN_WORKSPACE`` — the directory (unchanged contract);
     * ``HERMES_KANBAN_WORKSPACE_KIND`` — ``scratch`` / ``dir`` / ``worktree``;
-    * ``HERMES_KANBAN_WORKSPACE_IS_CHECKOUT`` — ``1``/``0``;
+    * ``HERMES_KANBAN_WORKSPACE_IS_CHECKOUT`` — ``1``/``0``, judged against the
+      kind: a ``worktree`` card is ``1`` only when the path itself is a work
+      tree, so a pruned ``<repo>/.worktrees/<id>`` (inside its parent repo, but
+      not on disk) reports ``0`` instead of telling a worker it has a checkout;
     * ``HERMES_KANBAN_WORKSPACE_TOPLEVEL`` — the repo root, only when ``1``.
 
     These are spawn-time facts about a child process, not behavioural settings,
@@ -442,8 +480,9 @@ def publish_workspace_env(env: dict, kind: Optional[str], workspace: Path | str 
     env["HERMES_KANBAN_WORKSPACE"] = str(workspace)
     state = workspace_checkout_state(workspace)
     env["HERMES_KANBAN_WORKSPACE_KIND"] = (kind or "scratch")
-    env["HERMES_KANBAN_WORKSPACE_IS_CHECKOUT"] = "1" if state["is_checkout"] else "0"
-    if state["toplevel"]:
+    checkout = _kind_is_satisfied(kind, state)
+    env["HERMES_KANBAN_WORKSPACE_IS_CHECKOUT"] = "1" if checkout else "0"
+    if checkout and state["toplevel"]:
         env["HERMES_KANBAN_WORKSPACE_TOPLEVEL"] = str(state["toplevel"])
 
 
