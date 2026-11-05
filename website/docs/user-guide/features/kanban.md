@@ -138,6 +138,46 @@ They coexist: a kanban worker may call `delegate_task` internally during its run
 - **Dispatcher** — a long-lived loop that, every N seconds (default 60): reclaims stale claims, reclaims crashed workers (PID gone but TTL not yet expired), reaps workers that outlived their finished run (a worker still alive after its own `kanban_complete`/`kanban_block` is terminated once its run has been closed for two minutes, leaving it time to finish its final turn — matched by PID *and* spawn-time fingerprint, so a recycled PID is never signalled; recorded as a `terminal_worker_reaped` event), promotes ready tasks, atomically claims, spawns assigned profiles. Runs **inside the gateway** by default (`kanban.dispatch_in_gateway: true`). One dispatcher sweeps all boards per tick; workers are spawned with `HERMES_KANBAN_BOARD` pinned so they can't see other boards. After `kanban.failure_limit` consecutive spawn failures on the same task (default: 2) the dispatcher auto-blocks it with the last error as the reason — prevents thrashing on tasks whose profile doesn't exist, workspace can't mount, etc.
 - **Tenant** — optional string namespace *within* a board. One specialist fleet can serve multiple businesses (`--tenant business-a`) with data isolation by workspace path and memory key prefix. Tenants are a soft filter; boards are the hard isolation boundary.
 
+### What a workspace is — and is not
+
+`workspace_path` means **the directory you work in**, not **a git checkout**. Those
+are different promises and conflating them costs runs: a worker that reads the
+field as "my checkout" finds a nearly empty `scratch` directory, correctly
+concludes there is no repository, and blocks on a card that was never broken.
+
+The contract is one line: a workspace matches its kind, and the worker is told
+which kind it got.
+
+| kind | what the path holds | is it a checkout? |
+|---|---|---|
+| `scratch` (default) | a per-task pad: notes, `verification.json`, artifacts you declare | **no** — and empty is the design, not a fault |
+| `dir:<path>` | an existing shared directory you named | only if that directory happens to be inside one |
+| `worktree` | a linked git worktree at `<repo>/.worktrees/<id>` | **yes** — by definition |
+
+The dispatcher sets three env vars in every worker so nobody has to infer it:
+`HERMES_KANBAN_WORKSPACE` (the path), `HERMES_KANBAN_WORKSPACE_KIND`
+(`scratch|dir|worktree`), and `HERMES_KANBAN_WORKSPACE_IS_CHECKOUT` (`1|0`,
+plus `HERMES_KANBAN_WORKSPACE_TOPLEVEL` when `1`). `kanban_show()` repeats the
+same fact in the workspace header, and calls it out in words when the kind and
+the directory disagree — a `scratch` pad with no repo gets an explicit
+"this is a scratch pad, not a checkout" note, and a `dir`/`worktree` card whose
+checkout is missing gets a warning instead of silence.
+
+Why `scratch` is not auto-upgraded to the board repo: scratch cards are
+deliberately repo-less (a decision card, a verdict, a review, an ops sweep has no
+repository), and materializing the board's `default_workdir` for every one of
+them would check out a full working tree per card — measured at ~900 MB each on
+a 60 GB repo. So a coding task that was created as `scratch` should create the
+checkout it needs, from `origin/main`:
+
+```bash
+git -C <repo> worktree add <path> origin/main
+```
+
+Create real coding cards as `worktree` (or link them to a project) when the repo
+is knowable up front — that gets the deterministic `<repo>/.worktrees/<id>`
+path, the branch, and the cleanup handling.
+
 ## Boards (multi-project)
 
 Boards let you separate unrelated streams of work — one per project, repo,
@@ -563,7 +603,7 @@ does exist, such as source URLs, issue ids, or manual review steps.
 Every profile that works kanban tasks automatically gets the worker lifecycle — it's injected into the worker's system prompt at spawn (the `KANBAN_GUIDANCE` block), so there is **nothing to install or configure**. It teaches the worker the full lifecycle in **tool calls**, not CLI commands:
 
 1. On spawn, call `kanban_show()` to read title + body + parent handoffs + prior attempts + full comment thread.
-2. `cd $HERMES_KANBAN_WORKSPACE` (via the terminal tool) and do the work there.
+2. `cd $HERMES_KANBAN_WORKSPACE` (via the terminal tool) and do the work there. It is the working directory, not necessarily a checkout — `$HERMES_KANBAN_WORKSPACE_IS_CHECKOUT` is `0` on a `scratch` card, and an empty scratch pad is the design. Make the checkout you need (`git -C <repo> worktree add <path> origin/main`) instead of blocking on it.
 3. Call `kanban_heartbeat(note="...")` every few minutes during long operations. **If your work may run longer than 1 hour, call `kanban_heartbeat` at least once an hour** — the dispatcher reclaims tasks that have been running past `kanban.dispatch_stale_timeout_seconds` (default 4 h) with no heartbeat in the last hour, on the assumption the worker crashed without cleanup. A reclaim is benign (the task goes back to `ready` for re-dispatch without a failure-counter tick) but you lose your current run's progress.
 4. Complete with `kanban_complete(summary="...", metadata={...})`, hand a code change off for same-card review with `kanban_request_review(summary="...")`, or `kanban_block(reason="...")` if stuck.
 

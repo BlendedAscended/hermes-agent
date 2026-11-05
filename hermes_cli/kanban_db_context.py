@@ -16,6 +16,18 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     now = int(time.time())
     lines: list[str] = []
     kb._ctx_header(lines, task)
+    # Say what the workspace path IS, not only what it is called. `workspace_path`
+    # is the worker's working directory, and a scratch card's directory is
+    # deliberately repo-less (#106342) — without this line a worker reads the
+    # field as "my checkout", finds an empty dir and blocks on a card that was
+    # never broken (t_2da84d09 burned three runs on exactly that, 2026-11-04).
+    # Assembled here rather than inside `_ctx_header` because it belongs to the
+    # worker-facing contract and `kanban_db` is over its file-length cap.
+    from hermes_cli import kanban_db_workspace as _kbw
+    _note = _kbw.workspace_contract_note(
+        task.workspace_kind, task.workspace_path, branch=task.branch_name)
+    if _note:
+        lines.append(_note)
     if task.current_run_id is not None:
         lines.append(f"Active run: {task.current_run_id}")
     kb._ctx_attachments(lines, kb.list_attachments(conn, task_id))

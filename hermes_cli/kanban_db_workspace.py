@@ -332,6 +332,121 @@ def _managed_scratch_path_info(p: Path) -> tuple[bool, Optional[str]]:
     return False, None
 
 
+def workspace_checkout_state(path: Path | str | None) -> dict:
+    """What a worker will actually FIND at its workspace path.
+
+    ``{"exists", "entries", "is_checkout", "toplevel"}``. ``is_checkout`` is True
+    when ``path`` or one of its ancestors carries a ``.git`` entry — a directory
+    for a normal checkout, a file for a linked worktree. ``toplevel`` is the
+    repo root that made it True (``path`` itself for a repo root).
+
+    A directory walk, NOT ``git rev-parse``: this is called while building the
+    worker header (every ``kanban_show``, every spawn), so a subprocess on the
+    hot path would be a tax for an answer ``stat`` already gives.
+
+    Never raises. A missing or unreadable path reports ``exists=False`` /
+    ``is_checkout=False`` instead of killing the header a worker needs to start.
+    """
+    state = {"exists": False, "entries": 0, "is_checkout": False, "toplevel": None}
+    if not path:
+        return state
+    try:
+        p = Path(path).expanduser()
+        state["exists"] = p.is_dir()
+        if state["exists"]:
+            with contextlib.suppress(OSError):
+                state["entries"] = sum(1 for _ in p.iterdir())
+        current = p if state["exists"] else _nearest_existing_path(p)
+        while True:
+            if (current / ".git").exists():
+                state["is_checkout"] = True
+                state["toplevel"] = str(current)
+                return state
+            if current == current.parent:
+                return state
+            current = current.parent
+    except OSError:
+        return state
+
+
+# The contract every worker reads, so nobody has to infer what a workspace is.
+# ``scratch`` is deliberately repo-less (#106342: an explicit scratch card must
+# not be upgraded into a worktree of the board's repo), so an empty scratch dir
+# is the DESIGN, not a fault — and a worker that blocks on it has misread the
+# field, not found a broken checkout.
+SCRATCH_PAD_NOTE = (
+    "Workspace note: this is a SCRATCH PAD, not a git checkout. It is the place "
+    "for this card's notes and evidence file; nothing is missing because it is "
+    "empty or has no repository. Do the code work in the task's own repo — if "
+    "you need an isolated checkout, create one from origin/main "
+    "(`git -C <repo> worktree add <path> origin/main`) — and do NOT block "
+    "because $HERMES_KANBAN_WORKSPACE is not a repo."
+)
+
+MISSING_CHECKOUT_NOTE = (
+    "Workspace warning: workspace_kind={kind} promises a git checkout here, but "
+    "this path is {problem}. Recreate it (`git -C <repo> worktree add <path> "
+    "{branch}`) before working, and block with that exact error if you cannot — "
+    "do not silently move the work somewhere else."
+)
+
+
+def workspace_contract_note(
+    kind: Optional[str], path: Path | str | None, *, branch: Optional[str] = None,
+) -> Optional[str]:
+    """One honest line about ``path`` for the worker header, or ``None``.
+
+    Silence when the workspace matches its kind: a ``scratch`` card that holds a
+    checkout, or a ``dir``/``worktree`` card whose checkout is present. The two
+    cases that used to cost runs are the noisy ones:
+
+    * a ``scratch`` pad with no repository — the normal case, and the one three
+      runs were burned guessing about on 2026-11-04 (t_2da84d09);
+    * a ``dir``/``worktree`` card whose checkout is gone or never existed, which
+      is a real fault and must be reported as one.
+    """
+    kind = (kind or "scratch").strip() or "scratch"
+    state = workspace_checkout_state(path)
+    if kind == "scratch":
+        return None if state["is_checkout"] else SCRATCH_PAD_NOTE
+    if state["is_checkout"]:
+        return None
+    problem = "missing" if not state["exists"] else "not a git work tree"
+    return MISSING_CHECKOUT_NOTE.format(
+        kind=kind, problem=problem, branch=(branch or "").strip() or "origin/main",
+    )
+
+
+def publish_workspace_env(env: dict, kind: Optional[str], workspace: Path | str | None) -> None:
+    """Put the workspace's PATH and its NATURE into a worker's environment.
+
+    ``workspace_path`` means "your working directory", not "your checkout".
+    A ``scratch`` card is deliberately repo-less (#106342 — an explicit scratch
+    card must not be upgraded into a worktree of the board's repo), so its
+    directory is usually empty. A worker that reads the bare path as "my
+    checkout" concludes the checkout is broken and blocks on a card that was
+    never broken: t_2da84d09 burned three runs that way on 2026-11-04, and 131 of
+    174 card workspaces on the council board hold no checkout.
+
+    Publishing the pair removes the guess:
+
+    * ``HERMES_KANBAN_WORKSPACE`` — the directory (unchanged contract);
+    * ``HERMES_KANBAN_WORKSPACE_KIND`` — ``scratch`` / ``dir`` / ``worktree``;
+    * ``HERMES_KANBAN_WORKSPACE_IS_CHECKOUT`` — ``1``/``0``;
+    * ``HERMES_KANBAN_WORKSPACE_TOPLEVEL`` — the repo root, only when ``1``.
+
+    These are spawn-time facts about a child process, not behavioural settings,
+    which is why they are env vars next to ``HERMES_KANBAN_TASK`` and
+    ``HERMES_KANBAN_BRANCH`` rather than config keys.
+    """
+    env["HERMES_KANBAN_WORKSPACE"] = str(workspace)
+    state = workspace_checkout_state(workspace)
+    env["HERMES_KANBAN_WORKSPACE_KIND"] = (kind or "scratch")
+    env["HERMES_KANBAN_WORKSPACE_IS_CHECKOUT"] = "1" if state["is_checkout"] else "0"
+    if state["toplevel"]:
+        env["HERMES_KANBAN_WORKSPACE_TOPLEVEL"] = str(state["toplevel"])
+
+
 def _scratch_workspace(conn: sqlite3.Connection, task_id: str) -> Optional[Path]:
     """Expanded ``workspace_path`` when the task uses a scratch workspace, else ``None``."""
     row = conn.execute(
