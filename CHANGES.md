@@ -1,3 +1,10 @@
+## 2026-11-09 18:04 (UTC) — Integrate Jev pre-execution terminal guard and agent loop step evaluator
+
+**Changes:**
+- Added `tools/jev_guard.py` and wired `jev_automode_block` into `tools/terminal_tool_guards.py` and `tools/terminal_tool.py::_pre_exec_block` so opt-in `HERMES_JEV_GUARD=1` checks block critical destruction commands using Layer 1 deterministic rules and `jev_automode_guard.py`.
+- Added `agent/jev_step_evaluator.py` and wired `assess_tool_round` into `agent/turn_tool_round.py`, `agent/conversation_loop.py`, `agent/kanban_stop.py`, and `agent/turn_stop_gates.py` for opt-in `HERMES_JEV_STEP_EVAL=1` completion/fatal-error checks with prompt-cache preservation and Kanban handoff safety.
+- Added unit tests in `tests/tools/test_terminal_jev_guard.py` and `tests/agent/test_jev_step_evaluator.py`; verified 75 passed across 6 test suites and clean ruff pre-commit lint.
+
 ## 2026-10-30 06:45 (UTC) — Fix Luna deterministic gate path and baseline exit checks
 
 **Changes:**
