@@ -1631,6 +1631,8 @@ def _run_conversation_turn(
     agent._ephemeral_reasoning_off = False
     agent._auth_pool_refresh_counts = {}
     agent._last_turn_usage = None
+    agent._last_jev_step_verdict = None
+    agent._jev_needs_human_steered = False
 
     s = _LoopState(
         system_message=system_message, moa_config=moa_config,

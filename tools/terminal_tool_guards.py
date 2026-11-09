@@ -289,3 +289,21 @@ def self_repo_block(
         return None
     logger.warning("Blocked self-repo git mutation (command: %s)", _safe_command_preview(command))
     return _blocked_json(msg, "blocked")
+
+
+def jev_automode_block(
+    *,
+    command: str,
+    cwd: str,
+    workdir: Optional[str],
+    session_key: str,
+) -> Optional[str]:
+    """Run the Jev automode risk gate when enabled (Kanban workers / HERMES_JEV_GUARD=1)."""
+    from tools.jev_guard import jev_automode_block as _jev_automode_block
+
+    return _jev_automode_block(
+        command=command,
+        cwd=cwd,
+        workdir=workdir,
+        session_key=session_key,
+    )

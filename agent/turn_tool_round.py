@@ -220,6 +220,41 @@ def run_tool_round(
     if _ptc.end_turn:
         return _verdict("break")
 
+    try:
+        from agent.jev_step_evaluator import assess_tool_round
+
+        jev_assessment = assess_tool_round(
+            agent,
+            assistant_message=assistant_message,
+            messages=messages,
+            user_message=user_message,
+        )
+    except Exception:
+        logger.debug("jev step evaluator check failed", exc_info=True)
+        jev_assessment = None
+
+    if jev_assessment is not None:
+        if jev_assessment.action == "break":
+            _turn_exit_reason = jev_assessment.exit_reason or "jev_step_evaluator_stop"
+            final_response = jev_assessment.final_response or ""
+            if jev_assessment.verdict:
+                emit_diag = getattr(agent, "_emit_diagnostic_status", None)
+                if callable(emit_diag):
+                    with suppress(Exception):
+                        emit_diag(
+                            f"Jev step evaluator stopped loop ({_turn_exit_reason}): "
+                            f"{jev_assessment.verdict.get('reason', '')}"
+                        )
+            agent._session_messages = messages
+            return _verdict("break")
+        if jev_assessment.steer_message:
+            append_message(
+                messages,
+                {"role": "user", "content": jev_assessment.steer_message, "_kanban_stop_synthetic": True},
+            )
+            with suppress(Exception):
+                agent._flush_messages_to_session_db(messages, conversation_history)
+
     # Save session log incrementally (so progress is visible even if interrupted)
     agent._session_messages = messages
     # Touch activity so slow post-tool work plus a slow follow-up API call can't exceed

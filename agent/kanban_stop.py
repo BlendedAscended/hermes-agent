@@ -157,6 +157,7 @@ def build_kanban_stop_nudge(
     attempts: int = 0,
     max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
     task_id: Optional[str] = None,
+    step_verdict: Optional[dict[str, Any]] = None,
 ) -> Optional[str]:
     """Synthetic follow-up when a kanban worker exits without a terminal tool; ``None`` when
     the guard should not fire (not a kanban worker, already completed/blocked, budget exhausted)."""
@@ -177,6 +178,21 @@ def build_kanban_stop_nudge(
         return None
 
     tid = owned_tid or "this task"
+    jev_note = ""
+    if isinstance(step_verdict, dict) and step_verdict.get("action") in ("needs_human", "stop_success"):
+        jev_action = step_verdict["action"]
+        jev_reason = str(step_verdict.get("reason") or "")
+        if jev_action == "needs_human":
+            jev_note = (
+                f"\n\nJev step evaluator flagged `needs_human` ({jev_reason}). "
+                "Call `kanban_block(reason=...)` instead of stopping with plain text."
+            )
+        else:
+            jev_note = (
+                f"\n\nJev step evaluator observed `stop_success` ({jev_reason}). "
+                "Call `kanban_complete(summary=..., artifacts=[...])` or "
+                "`kanban_request_review(summary=...)` instead of stopping with plain text."
+            )
     return (
         "[System: You are a Hermes kanban worker. A plain-text reply is NOT a "
         "terminal state for the board.\n\n"
@@ -195,8 +211,8 @@ def build_kanban_stop_nudge(
         "change that needs same-card review, OR `kanban_block(reason=...)` if you are "
         "blocked. Reviewers approve with `kanban_complete` or send the card back with "
         "`kanban_request_changes(reason=...)`.\n\n"
-        "Never end a turn with only a promise of future action. Repeated "
-        "protocol violations will block this task and require manual intervention.]"
+        f"Never end a turn with only a promise of future action. Repeated "
+        f"protocol violations will block this task and require manual intervention.{jev_note}]"
     )
 
 
