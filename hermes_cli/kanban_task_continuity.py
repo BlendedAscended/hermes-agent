@@ -4,12 +4,29 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 import sqlite3
 import time
 from pathlib import Path
 from typing import Any
 
 from hermes_cli import kanban_db as kb
+
+# Verification evidence used to live only where the worker happened to write it,
+# usually a profile scratch directory that is pruned after a day. The digest in
+# the receipt then pointed at nothing, so an old acceptance could never be
+# re-checked. Every receipt now keeps its own copy here, named by that digest.
+def _evidence_root() -> Path:
+    """Resolved per call so an isolated board root (tests, a second profile) stays isolated."""
+    override = os.environ.get("HERMES_EVIDENCE_ROOT")
+    if override:
+        return Path(override).expanduser()
+    return kb.kanban_home() / "evidence"
+
+
+def _safe_component(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", str(value))[:80] or "unknown"
 
 CONTINUITY_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS task_checkpoints (
@@ -99,6 +116,41 @@ def _verify_owner(conn: sqlite3.Connection, task_id: str, run_id: int, tenant: A
     if not token or row["claim_lock"] != token or row["run_lock"] != token:
         raise OutcomeReceiptError("receipt claim token is stale or does not own the active run")
     return row
+
+
+def _persist_evidence(receipt: dict, task_id: str) -> None:
+    """Copy the verification artifact somewhere that outlives the scratch dir.
+
+    Runs before verification so a replay whose source file was already pruned can
+    still be checked against the durable copy. The target name is derived from the
+    digest, so a retry lands on the same file and the stored payload stays byte
+    identical, which is what the idempotency check compares.
+
+    Never raises: a failure to copy leaves the receipt untouched, and the normal
+    verification then reports the real problem.
+    """
+    verification = receipt.get("verification")
+    if not isinstance(verification, dict):
+        return
+    path = verification.get("evidence_path")
+    digest = verification.get("evidence_sha256")
+    if not isinstance(path, str) or not isinstance(digest, str) or len(digest) < 16:
+        return
+    source = Path(path)
+    target_dir = _evidence_root() / _safe_component(task_id)
+    target = target_dir / f"{_safe_component(digest[:16])}{source.suffix or '.json'}"
+    try:
+        if not target.exists():
+            if not source.exists():
+                return
+            target_dir.mkdir(parents=True, exist_ok=True)
+            staging = target.with_name(target.name + ".tmp")
+            staging.write_bytes(source.read_bytes())
+            os.replace(staging, target)
+        verification.setdefault("source_path", str(source))
+        verification["evidence_path"] = str(target)
+    except OSError:
+        return
 
 
 def _verify_evidence(receipt: dict) -> None:
@@ -222,6 +274,11 @@ def accept_outcome(conn: sqlite3.Connection, task_id: str, run_id: int, token: s
     idempotency_key = receipt.get("idempotency_key")
     if not isinstance(idempotency_key, str) or not idempotency_key.strip() or len(idempotency_key) > 200:
         raise OutcomeReceiptError("a bounded idempotency_key is required")
+    # Persist before the payload digest so the stored row points at the durable
+    # copy. Verification itself stays after the replay check: a retry that is
+    # byte identical to the stored row must not fail because the source tree it
+    # referenced has since been cleaned.
+    _persist_evidence(receipt, task_id)
     stored = {"receipt": receipt, "handoff": handoff}
     raw, _ = _json_digest(stored)
     input_digest = task_input_digest(conn, task_id)
