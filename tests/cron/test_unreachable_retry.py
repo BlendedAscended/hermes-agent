@@ -2,8 +2,8 @@
 
 Contract (cron/unreachable_retry.py): a recurring job whose run fails with a transient
 network/DNS error before ANY model call gets its ``next_run_at`` pulled earlier along a
-bounded ladder (5/15/30 min); a run that reaches the model resets the ladder, and the
-ladder never fires past its last rung.
+ladder (5/15/30 min), then every 30 minutes until the network returns or the schedule's
+own next occurrence arrives; a run that reaches the model resets the ladder.
 """
 
 from datetime import datetime, timedelta, timezone, UTC
@@ -27,13 +27,13 @@ def _iso(dt: datetime) -> str:
     return dt.isoformat()
 
 
-def test_unreachable_failure_pulls_next_run_earlier_then_ladder_exhausts(
+def test_unreachable_failure_pulls_next_run_earlier_then_retries_steadily(
     tmp_cron_home, monkeypatch,
 ):
     """Failed-unreachable runs re-fire on the 5/15/30-minute ladder instead of waiting a
-    full period, and the ladder stops after its last rung (falls back to the schedule). A
-    cron job's ladder instant is off its lattice yet must be due, not re-anchored as a stale
-    expression edit."""
+    full period, then keep re-firing every 30 minutes rather than skipping to the schedule:
+    an outage longer than the ladder must not cost the whole period. A cron job's ladder
+    instant is off its lattice yet must be due, not re-anchored as a stale expression edit."""
     # Interval, not a cron expression: the natural next fire is always a full day out. A
     # fixed clock time ("0 3 * * *") makes the 30-minute rung land past the natural fire
     # in the half hour before it, and plan_retry rightly yields to the schedule (CI red).
@@ -50,11 +50,13 @@ def test_unreachable_failure_pulls_next_run_earlier_then_ladder_exhausts(
             f"attempt {i}: expected retry ~{delay}s out, got {nxt - now}")
         assert j[ur.STATE_KEY]["attempt"] == i + 1
 
-    # Ladder exhausted: the next unreachable failure keeps the natural schedule.
-    assert mark_job_run(job_id, False, "ConnectError: dns", model_unreachable=True)
-    j = get_job(job_id)
-    assert j.get(ur.STATE_KEY) is None
-    assert datetime.fromisoformat(j["next_run_at"]) - now > timedelta(hours=1)
+    # Past the ladder: still offline, so re-run again in 30 minutes, not tomorrow.
+    for extra in range(2):
+        assert mark_job_run(job_id, False, "ConnectError: dns", model_unreachable=True)
+        j = get_job(job_id)
+        nxt = datetime.fromisoformat(j["next_run_at"])
+        assert timedelta(0) < nxt - now <= timedelta(seconds=ur.STEADY_RETRY_SECONDS + 120)
+        assert j[ur.STATE_KEY]["attempt"] == len(ur.RETRY_DELAYS_SECONDS) + extra + 1
 
     pinned = datetime(2026, 9, 18, 12, 1, tzinfo=UTC)
     monkeypatch.setattr("cron.jobs._hermes_now", lambda: pinned)
@@ -185,9 +187,74 @@ def test_ladder_reruns_do_not_spend_extra_repeat_budget(tmp_cron_home, monkeypat
         assert get_job(job_id)["repeat"]["completed"] == 1, "only the occurrence itself counts"
 
     j = get_job(job_id)
-    assert j["state"] == "scheduled" and j.get(ur.STATE_KEY) is None
-    assert datetime.fromisoformat(j["next_run_at"]) - clock[0] > timedelta(hours=23)
-    # A rung on the last slot no longer completes the job, so its notice is held as well.
-    assert held == [True, True, True, False]
+    # Still offline after the ladder: a steady re-run is parked 30 minutes out, not the next day.
+    assert j["state"] == "scheduled"
+    assert j[ur.STATE_KEY]["attempt"] == len(ur.RETRY_DELAYS_SECONDS) + 1
+    assert datetime.fromisoformat(j["next_run_at"]) - clock[0] <= timedelta(
+        seconds=ur.STEADY_RETRY_SECONDS + 120)
+    # A rung never completes the job, so every notice is held while a re-run is pending.
+    assert held == [True, True, True, True]
     # But a rung whose limit was edited down to the count does retire the job: send its notice.
     assert not ur.will_retry(dict(runs[1], repeat={"times": 1, "completed": 1}))
+
+
+def test_offline_summary_counts_as_model_unreachable():
+    """A failed run_conversation hands the cron runner only the agent's offline summary, with no
+    transport error in the chain. It must still enter the ladder (missed on 2026-11-09, when a
+    morning offline cost every daily content job its run)."""
+    from types import SimpleNamespace
+
+    from agent.api_error_summary import OFFLINE_PROVIDER_SUMMARY
+
+    offline = RuntimeError(OFFLINE_PROVIDER_SUMMARY)
+    assert ur.is_model_unreachable_failure(offline, None)
+    assert ur.is_model_unreachable_failure(offline, SimpleNamespace(session_api_calls=0))
+    # A model call already happened: re-running could repeat its side effects.
+    assert not ur.is_model_unreachable_failure(offline, SimpleNamespace(session_api_calls=1))
+    assert not ur.is_model_unreachable_failure(RuntimeError("agent reported failure"), None)
+
+
+def test_late_open_offline_catch_up_retries_until_network_returns(tmp_cron_home, monkeypatch):
+    """The laptop sleeps through a daily 06:00 job and wakes the next afternoon before Wi-Fi is
+    back. The catch-up fires once, fails offline, and re-runs (5m, 15m, 30m, then every 30m)
+    instead of waiting for the next 06:00. The first run that reaches the model ends the cycle
+    and the job returns to its schedule."""
+    clock = [datetime(2026, 11, 9, 5, 0, tzinfo=UTC)]
+    monkeypatch.setattr("cron.jobs._hermes_now", lambda: clock[0])
+    monkeypatch.setattr(ur, "_hermes_now", lambda: clock[0])
+    job_id = create_job("signal scan", "0 6 * * *")["id"]
+
+    clock[0] = datetime(2026, 11, 10, 14, 0, tzinfo=UTC)  # opened a day late
+    assert job_id in {d["id"] for d in get_due_jobs()}, "a missed daily run catches up once"
+
+    for delay in (*ur.RETRY_DELAYS_SECONDS, ur.STEADY_RETRY_SECONDS):
+        assert mark_job_run(job_id, False, "ConnectError: dns", model_unreachable=True)
+        retry_at = datetime.fromisoformat(get_job(job_id)["next_run_at"])
+        assert retry_at == clock[0] + timedelta(seconds=delay)
+        clock[0] = retry_at + timedelta(seconds=1)
+        assert job_id in {d["id"] for d in get_due_jobs()}, "the parked re-run is due"
+
+    # The network is back: the run succeeds, the ladder clears, the schedule resumes.
+    assert mark_job_run(job_id, True)
+    j = get_job(job_id)
+    assert j.get(ur.STATE_KEY) is None
+    assert datetime.fromisoformat(j["next_run_at"]) == datetime(2026, 11, 11, 6, 0, tzinfo=UTC)
+
+
+def test_scheduled_occurrence_takes_over_from_steady_retries(tmp_cron_home, monkeypatch):
+    """Steady re-runs never fire past the schedule's own next occurrence: when that comes
+    first, it runs instead and the retry state resets for a fresh ladder."""
+    clock = [datetime(2026, 11, 9, 5, 45, tzinfo=UTC)]
+    monkeypatch.setattr("cron.jobs._hermes_now", lambda: clock[0])
+    monkeypatch.setattr(ur, "_hermes_now", lambda: clock[0])
+    job_id = create_job("hourly digest", "0 * * * *")["id"]
+    jobs = load_jobs()
+    rec = next(j for j in jobs if j["id"] == job_id)
+    rec[ur.STATE_KEY] = {"attempt": len(ur.RETRY_DELAYS_SECONDS), "at": None,
+                         "expr": rec["schedule"]["expr"]}
+    save_jobs(jobs)
+
+    assert mark_job_run(job_id, False, "ConnectError: dns", model_unreachable=True)
+    j = get_job(job_id)
+    assert j.get(ur.STATE_KEY) is None
+    assert datetime.fromisoformat(j["next_run_at"]) == datetime(2026, 11, 9, 6, 0, tzinfo=UTC)

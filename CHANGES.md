@@ -1,3 +1,12 @@
+## 2026-11-09 20:06 (UTC) — cron: offline runs now retry until the network returns instead of skipping the period
+
+**Changes:**
+- Root cause (2026-11-09): a failed run_conversation hands the cron runner only the agent's offline summary ("Hermes can't reach the model provider..."), with no transport error in the chain. cron.unreachable_retry never classified it, so the 5/15/30 minute ladder never fired and every daily content job lost its run for the day.
+- is_model_unreachable_failure now also matches agent.api_error_summary.OFFLINE_PROVIDER_SUMMARY (new shared constant; the summary text itself is unchanged). Still requires zero model calls, so re-runs stay spend neutral.
+- After the 5/15/30 minute ladder, re-runs continue every 30 minutes (STEADY_RETRY_SECONDS) until the network returns or the schedule's next occurrence, which then takes over with a fresh ladder. Missed runs while the laptop sleeps already catch up once on wake (cron.catch_up_missed); that catch up now survives waking before Wi-Fi reconnects.
+- Files: cron/unreachable_retry.py, agent/api_error_summary.py, tests/cron/test_unreachable_retry.py (ladder exhaustion tests rewritten to the new intent; added offline summary, late open catch up and occurrence takeover tests).
+- Disable with cron.retry_unreachable: false. No config or schema migration.
+
 ## 2026-11-09 18:04 (UTC) — Integrate Jev pre-execution terminal guard and agent loop step evaluator
 
 **Changes:**

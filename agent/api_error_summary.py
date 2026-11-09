@@ -48,6 +48,12 @@ _NETWORK_RESOLUTION_MARKERS = (
     "no address associated with hostname",
     "network is unreachable",
 )
+# The offline hint replaces the transport error; cron.unreachable_retry matches this exact text
+# because a failed run_conversation hands the cron runner only the summary, not the chain.
+OFFLINE_PROVIDER_SUMMARY = (
+    "Hermes can't reach the model provider. You may be offline. "
+    "Check your internet connection and try again."
+)
 _XAI_ENTITLEMENT_HINT = (
     " — xAI rejected this OAuth account. NOTE: X Premium+ does NOT "
     "include xAI API access — only standalone SuperGrok subscribers "
@@ -165,10 +171,7 @@ class ApiErrorSummaryMixin:
         while current is not None and id(current) not in seen:
             seen.add(id(current))
             if any(marker in str(current).lower() for marker in _NETWORK_RESOLUTION_MARKERS):
-                return (
-                    "Hermes can't reach the model provider. You may be offline. "
-                    "Check your internet connection and try again."
-                )
+                return OFFLINE_PROVIDER_SUMMARY
             current = current.__cause__ or current.__context__
 
         if is_provider_stream_parse_error(error):

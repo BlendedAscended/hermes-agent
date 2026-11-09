@@ -12,6 +12,10 @@ which has to answer for one-shot dispatch accounting and mid-run side effects. R
 jobs only: finite one-shots are pre-claimed by ``claim_dispatch`` (at-most-times, #38758)
 and must not regain a consumed dispatch here.
 
+After the ladder, re-runs continue every ``STEADY_RETRY_SECONDS`` until the network returns or
+the schedule's own next occurrence arrives. A laptop that wakes offline, or stays offline all
+morning, then still does the day's work once it reconnects instead of skipping a full period.
+
 While a retry is pending the failure notice is suppressed (Cowork re-runs silently); a
 run that reaches the model — success or not — resets the ladder. Disable with
 ``cron.retry_unreachable: false`` in config.yaml.
@@ -28,9 +32,11 @@ from hermes_time import now as _hermes_now
 
 logger = logging.getLogger("cron.scheduler")
 
-# Cowork's ladder: re-run after 5, 15, then 30 minutes; then give up until the
-# schedule's own next occurrence.
+# Cowork's ladder: re-run after 5, 15, then 30 minutes.
 RETRY_DELAYS_SECONDS: tuple[int, ...] = (300, 900, 1800)
+# Past the ladder, keep re-running at this interval; the natural occurrence bounds the phase.
+# Spend-neutral like the ladder: a re-run only follows a failure with zero model calls.
+STEADY_RETRY_SECONDS = 1800
 
 # Persisted on the job while a retry cycle is active: {"attempt": <1-based count of
 # retries already scheduled>, "at": <ISO instant of the pending retry>, "expr": <the cron
@@ -62,7 +68,20 @@ def is_model_unreachable_failure(exc: BaseException, agent: Any = None) -> bool:
         return False
     from cron.scheduler_preflight import _is_transient_provider_resolve_error
 
-    return _is_transient_provider_resolve_error(exc)
+    if _is_transient_provider_resolve_error(exc):
+        return True
+    # A failed run_conversation returns only the offline summary text, which the cron runner
+    # re-raises with no transport error in the chain to classify (missed on 2026-11-09).
+    from agent.api_error_summary import OFFLINE_PROVIDER_SUMMARY
+
+    return OFFLINE_PROVIDER_SUMMARY.lower() in str(exc).lower()
+
+
+def _retry_delay(attempt: int) -> int:
+    """Seconds until re-run number ``attempt + 1``: the ladder rung, then the steady interval."""
+    if attempt < len(RETRY_DELAYS_SECONDS):
+        return RETRY_DELAYS_SECONDS[attempt]
+    return STEADY_RETRY_SECONDS
 
 
 def _ladder_applies(job: dict[str, Any]) -> bool:
@@ -73,16 +92,16 @@ def _ladder_applies(job: dict[str, Any]) -> bool:
 def _ladder_instant(job: dict[str, Any], natural_next: Optional[datetime],
                     now: datetime) -> Optional[datetime]:
     """The ladder instant ``plan_retry`` parks for this flagged failure, or None when it
-    parks nothing: not recurring, paused, disabled, ladder exhausted, or the schedule's
-    own *natural_next* fires at or before the rung. The single source of that decision
-    for ``plan_retry`` and ``will_retry``."""
+    parks nothing: not recurring, paused, disabled, or the schedule's own *natural_next*
+    fires at or before the rung. The single source of that decision for ``plan_retry``
+    and ``will_retry``."""
     attempt = int((job.get(STATE_KEY) or {}).get("attempt") or 0)
-    if attempt >= len(RETRY_DELAYS_SECONDS) or not _ladder_applies(job):
+    if not _ladder_applies(job):
         return None
     # late: jobs imports this module's helpers
     from cron.jobs import _instant_at_or_before, _seconds_after
 
-    retry_dt = _seconds_after(now, RETRY_DELAYS_SECONDS[attempt])
+    retry_dt = _seconds_after(now, _retry_delay(attempt))
     if natural_next is not None and _instant_at_or_before(natural_next, retry_dt):
         return None  # the natural occurrence IS the retry
     return retry_dt
@@ -143,24 +162,23 @@ def plan_retry(job: dict[str, Any]) -> bool:
     retry_dt = _ladder_instant(job, _parse_aware(job.get("next_run_at")), _hermes_now())
     attempt = int((job.get(STATE_KEY) or {}).get("attempt") or 0)
     if retry_dt is None:
-        if attempt >= len(RETRY_DELAYS_SECONDS) and _ladder_applies(job):
-            # Ladder exhausted: fall back to the natural schedule and reset so the NEXT
-            # occurrence gets a fresh ladder if the network is still down.
+        if attempt > 0 and _ladder_applies(job):
+            # The scheduled occurrence comes before the next re-run: it takes over, and the
+            # reset gives it a fresh ladder if the network is still down.
             logger.warning(
-                "Job '%s': model unreachable after %d automatic re-runs — waiting for the "
-                "scheduled occurrence at %s",
+                "Job '%s': model unreachable after %d automatic re-runs — the scheduled "
+                "occurrence at %s takes over",
                 job.get("name", job.get("id", "?")), attempt, job.get("next_run_at"))
         clear_state(job)
         return False
-    delay = RETRY_DELAYS_SECONDS[attempt]
+    delay = _retry_delay(attempt)
     retry_at = retry_dt.isoformat()
     job[STATE_KEY] = {"attempt": attempt + 1, "at": retry_at, "expr": job["schedule"].get("expr")}
     job["next_run_at"] = retry_at
     if job.get("state") != "paused":
         job["state"] = "scheduled"
     logger.info(
-        "Job '%s': model unreachable with zero API calls — automatic re-run %d/%d in %ds "
-        "(at %s)",
-        job.get("name", job.get("id", "?")), attempt + 1, len(RETRY_DELAYS_SECONDS),
-        delay, retry_at)
+        "Job '%s': model unreachable with zero API calls — automatic re-run %d in %ds "
+        "(at %s, until the network returns or the next scheduled occurrence)",
+        job.get("name", job.get("id", "?")), attempt + 1, delay, retry_at)
     return True
