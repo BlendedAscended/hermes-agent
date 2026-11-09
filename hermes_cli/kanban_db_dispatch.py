@@ -129,6 +129,14 @@ class DispatchResult:
     Code terminal like ``orion-cc``), not a Hermes profile. Expected steady-state
     on multi-lane setups, NOT operator-actionable; tracked apart so health
     telemetry can tell "stuck" from "correctly idle"."""
+    hold_screen_blocked: str = ""
+    """Non-empty when the hold screen refused the WHOLE tick: policy ``hold_all``,
+    the legacy ``~/.hermes/kanban/HOLD`` file, or a policy that could not be
+    parsed. Nothing was reclaimed, promoted or spawned. Empty on a clear board."""
+    skipped_hold_screen: list[tuple[str, str, str]] = field(default_factory=list)
+    """``(task_id, title, reason)`` ready cards the screen refused to spawn this
+    tick. They stay ``ready`` and are re-screened every tick; blocking them with
+    a written reason remains council-tick.py's job because that mutates a card."""
     skipped_per_profile_capped: list[tuple[str, str, int]] = field(default_factory=list)
     """``(task_id, assignee, current_running_count)`` deferred because the
     assignee is at ``kanban.max_in_progress_per_profile``. Picked up on a later
@@ -2103,7 +2111,10 @@ def _dispatch_lane_task(
             # spawned leaves the card `running` with a NULL worker_pid until its
             # claim expires, and `detect_crashed_workers` filters on
             # `worker_pid IS NOT NULL`, so nothing reclaims it early. Measured
-            # twice on 2026-11-03 (t_8654c5bb, t_0e4c83ae).
+            # twice on 2026-11-03 (t_8654c5bb, t_0e4c83ae): card locked, no
+            # process, no log file, 15 minutes of lost slot. Release it now and
+            # book it as infrastructure so the retry budget is not spent on a
+            # host that could not place the worker.
             _record_task_failure(
                 conn, claimed.id, "spawn returned no pid",
                 outcome="spawn_failed", failure_limit=failure_limit,
@@ -2312,6 +2323,39 @@ def _resolve_default_assignee(default_assignee: Optional[str]) -> Optional[str]:
 # The dispatch lock has been released here. Fire the tick observer strictly OUTSIDE the single-writer
 # critical section (#56066 sweeper finding / #64231 disposition): a slow subscriber must never extend the
 # lock hold and stall a sibling dispatcher's tick.
+def _dispatch_screen(conn, board, ready_rows):
+    """Apply the hold screen to one tick's ready rows.
+
+    Returns ``(kept_rows, hits, hold_reason)``.
+
+    This is the single choke point every dispatch path shares -- the CLI
+    ``hermes kanban dispatch``, the gateway's embedded dispatcher, the dashboard
+    nudge and the standalone daemon all call :func:`dispatch_once`. A screen
+    anywhere else is a wrapper, and a wrapper only covers the callers that use
+    it: on 2026-11-03 a manual CLI pass spawned ``t_37ff7bcd`` straight past the
+    guarded cron wrapper.
+
+    Fails OPEN to the pre-gate behaviour when the screen MODULE cannot be
+    imported (a packaging fault is not an operator hold). A policy file that
+    exists but cannot be parsed still fails CLOSED, inside the module, because a
+    hold that silently disappears is worse than a noisy one.
+    """
+    try:
+        from hermes_cli import kanban_dispatch_gate as gate
+    except Exception:
+        return ready_rows, [], ""
+    try:
+        decision = gate.evaluate(conn, board, task_ids=[r["id"] for r in ready_rows] or None)
+    except Exception:
+        return ready_rows, [], ""
+    if decision.hold_reason:
+        return [], [], decision.hold_reason
+    if not decision.hits:
+        return ready_rows, [], ""
+    denied = {tid for tid, _title, _reason in decision.hits}
+    return [r for r in ready_rows if r["id"] not in denied], decision.hits, ""
+
+
 def _dispatch_once_locked(
     conn: sqlite3.Connection,
     *,
@@ -2333,6 +2377,13 @@ def _dispatch_once_locked(
     the PID so later ticks catch crashes before the TTL. Cap semantics:
     :func:`_tick_spawn_budget`."""
     result = DispatchResult()
+    # A WHOLE-board hold skips the tick before reclaim/promotion, not only before
+    # spawn: promotion is not gated by the spawn budget, so holding after it
+    # would keep building a ready backlog for the duration of the hold.
+    _held = _dispatch_screen(conn, board, [])
+    if _held[2]:
+        result.hold_screen_blocked = _held[2]
+        return result
     _continuity.reconcile_pending_outcomes(conn)
     _run_reclaim_phase(
         conn, result, stale_timeout_seconds=stale_timeout_seconds,
@@ -2344,7 +2395,12 @@ def _dispatch_once_locked(
     if not may_spawn:
         return result
 
-    ready_rows = _lane_rows(conn, "ready")
+    ready_rows, _screen_hits, _screen_hold = _dispatch_screen(conn, board, _lane_rows(conn, "ready"))
+    if _screen_hits:
+        result.skipped_hold_screen = list(_screen_hits)
+    if _screen_hold:
+        result.hold_screen_blocked = _screen_hold
+        return result
     # Review rows are enumerated up front so the budget split can see whether
     # review work exists at all.
     review_rows = _lane_rows(conn, "review") if review_dispatch_enabled() else []

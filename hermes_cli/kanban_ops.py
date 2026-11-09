@@ -106,6 +106,11 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
                 for (tid, who, current) in res.skipped_per_profile_capped
             ],
             "auto_assigned_default": res.auto_assigned_default,
+            "hold_screen_blocked": res.hold_screen_blocked,
+            "skipped_hold_screen": [
+                {"task_id": tid, "title": title, "reason": reason}
+                for (tid, title, reason) in res.skipped_hold_screen
+            ],
             "respawn_guarded": [
                 {"task_id": tid, "reason": reason}
                 for (tid, reason) in res.respawn_guarded
