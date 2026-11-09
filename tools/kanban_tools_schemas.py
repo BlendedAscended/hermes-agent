@@ -112,7 +112,9 @@ KANBAN_COMPLETE_SCHEMA = _schema(
         "summary": _prop("string", (
                 "Human-readable handoff, 1-3 sentences. Appears in "
                 "Run History on the dashboard and in downstream "
-                "workers' context."
+                "workers' context. Required in addition to "
+                "outcome_receipt — the receipt is the audit trail, "
+                "NOT the handoff; a call with only a receipt is rejected."
         )),
         "metadata": _prop("object", (
                 "Free-form dict of structured facts about this "
@@ -165,13 +167,23 @@ KANBAN_COMPLETE_SCHEMA = _schema(
         },
         "outcome_receipt": {
             "type": "object",
-            "description": "Required for dispatcher workers before complete or review. Bind verified local evidence to this task, run and input digest. Use external_effect_state=none only; unresolved external actions remain open.",
+            "description": (
+                "Required for dispatcher workers before complete or review. "
+                "Bind verified local evidence to this task, run and input "
+                "digest. Use external_effect_state=none only; unresolved "
+                "external actions remain open. NOTE: a receipt is the audit "
+                "trail only — it does NOT satisfy the summary/handoff "
+                "requirement. Always supply ``summary`` (or ``result``) "
+                "alongside it, or the call is rejected."
+            ),
             "required": ["version", "task_id", "run_id", "tenant", "input_sha256", "idempotency_key", "disposition", "external_effect_state", "verification", "evidence"],
             "properties": {
                 "version": {"type": "integer", "enum": [1]},
                 "task_id": {"type": "string"},
                 "run_id": {"type": "integer"},
-                "tenant": {"type": ["string", "null"]},
+                "tenant": {"type": ["string", "null"], "description": (
+                    "The task's tenant. For a task with tenant IS NULL send "
+                    "a bare JSON null — NEVER the string \"null\".")},
                 "input_sha256": {"type": "string"},
                 "idempotency_key": {"type": "string"},
                 "disposition": {"type": "string", "enum": ["complete", "review"]},
@@ -291,11 +303,18 @@ KANBAN_REQUEST_REVIEW_SCHEMA = _schema(
             ),
         },
         "outcome_receipt": {
-            "type": "object", "description": "Required for dispatcher workers before review. Bind verified local evidence to this task, run and input digest. Ambiguous external actions cannot be handed off as complete.",
+            "type": "object", "description": (
+                "Required for dispatcher workers before review. Bind verified "
+                "local evidence to this task, run and input digest. Ambiguous "
+                "external actions cannot be handed off as complete. NOTE: a "
+                "receipt is the audit trail only — it does NOT replace the "
+                "required ``summary``."),
             "required": ["version", "task_id", "run_id", "tenant", "input_sha256", "idempotency_key", "disposition", "external_effect_state", "verification", "evidence"],
             "properties": {
                 "version": {"type": "integer", "enum": [1]}, "task_id": {"type": "string"},
-                "run_id": {"type": "integer"}, "tenant": {"type": ["string", "null"]},
+                "run_id": {"type": "integer"}, "tenant": {"type": ["string", "null"], "description": (
+                    "The task's tenant. For a task with tenant IS NULL send "
+                    "a bare JSON null — NEVER the string \"null\".")},
                 "input_sha256": {"type": "string"}, "idempotency_key": {"type": "string"},
                 "disposition": {"type": "string", "enum": ["complete", "review"]},
                 "external_effect_state": {"type": "string", "enum": ["none"]},

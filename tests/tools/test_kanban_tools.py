@@ -245,6 +245,43 @@ def test_worker_completion_requires_valid_task_scoped_evidence(worker_env, worke
         assert kb.get_task(conn, worker_env).status == "running"
 
 
+def test_complete_receipt_without_summary_names_the_handoff_requirement(worker_env, worker_outcome_receipt):
+    """t_1c17447b regression: a dispatcher worker that satisfies the receipt but
+    omits summary/result must be told that the receipt is the audit trail and
+    does NOT replace the human-readable handoff — not just the generic
+    'provide at least one of: summary (preferred), result', which sent the
+    original worker on a 25-attempt diagnostic detour."""
+    from tools import kanban_tools as kt
+
+    # Receipt only: the exact call shape the failing worker emitted 8 times.
+    out = json.loads(kt._handle_complete({
+        "board": "test-board",
+        "outcome_receipt": worker_outcome_receipt,
+    }))
+    assert out.get("error"), out
+    assert "summary is required even when outcome_receipt is supplied" in out["error"], out["error"]
+    assert "audit trail" in out["error"], out["error"]
+
+    # The task must still be running — the rejection must not close the card.
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    with kbc.connect() as conn:
+        assert kb.get_task(conn, worker_env).status == "running"
+
+    # Control: the same receipt WITH a summary sails past the summary check.
+    from hermes_cli.kanban_task_continuity import task_input_digest
+    with kbc.connect() as conn:
+        task = kb.get_task(conn, worker_env)
+        good = dict(worker_outcome_receipt,
+                    input_sha256=task_input_digest(conn, worker_env),
+                    idempotency_key=f"{worker_env}:{task.current_run_id}:summary-regression")
+    ok = json.loads(kt._handle_complete({
+        "summary": "handoff present alongside the receipt",
+        "outcome_receipt": good,
+    }))
+    assert ok.get("ok") is True, ok
+
+
 def test_complete_retry_with_empty_created_cards_succeeds(worker_env, worker_outcome_receipt):
     """After a phantom rejection, retrying kanban_complete with
     created_cards=[] (the documented escape hatch) must complete the
