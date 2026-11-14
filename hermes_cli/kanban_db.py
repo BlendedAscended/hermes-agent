@@ -1262,12 +1262,24 @@ def create_task(
 
         idempotency_key = derive_land_key(title, body)
 
+    # Every other create gets an auto key from (tenant, board, normalized
+    # title) so a repeat create dedupes instead of cloning. Done/archived rows
+    # are outside the dedup scope, so periodic boards can reuse a title once
+    # the previous cycle's card finished.
+    if not idempotency_key:
+        import hashlib as _hl
+
+        _norm_title = re.sub(r"\s+", " ", (title or "").strip().lower())
+        idempotency_key = "auto:" + _hl.sha256(
+            f"{tenant or ''}|{board or ''}|{_norm_title}".encode()
+        ).hexdigest()[:24]
+
     # Idempotency check BEFORE the write txn (no lock held); a concurrent-create
     # race may insert twice, the next lookup stabilises on the newest.
     if idempotency_key:
         row = conn.execute(
             "SELECT id FROM tasks WHERE idempotency_key = ? "
-            "AND status != 'archived' "
+            "AND status NOT IN ('archived', 'done') "
             "ORDER BY created_at DESC LIMIT 1", (idempotency_key,),
         ).fetchone()
         if row:
