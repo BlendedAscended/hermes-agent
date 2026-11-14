@@ -1,3 +1,11 @@
+## 2026-11-14 17:46 (UTC) — cron: a DNS resolution failure is named `dns_resolution_failed`, not `timeout`
+
+**Changes:**
+- Root cause (2026-11-09, job b9b7fcab8698 weekly-self-evolving-singularity-matrix): the run died on `socket.gaierror: [Errno 8] nodename nor servname provided, or not known` inside `urllib.error.URLError`, but the incident row was filed as `failure_type='timeout'`, so triage chased a slow endpoint. The traceback for a resolver failure also carries socket's own `self.timeout` argument line and the caller's `timeout=25`, and `_classify_failure_type` matched `timeout` before any DNS marker existed.
+- `cron.incidents._FAILURE_TYPE_ORDER` now checks `dns_resolution_failed` FIRST, so the specific cause wins over the incidental word in the same text. Markers: `nodename nor servname`, `name or service not known`, `temporary failure in name resolution`, `no address associated with hostname`, `getaddrinfo failed`, plus `gaierror` itself — the same rule (and the same markers) as `classify_error` in ai-config-transfer `configs/hermes/scripts/frontier_discovery.py`.
+- Files: cron/incidents.py, tests/cron/test_cron_incidents.py (3 regression tests: gaierror/URLError(gaierror)/platform spellings classify as `dns_resolution_failed`; real timeouts still classify as `timeout`; the stored incident row carries the corrected type).
+- No schedule, job definition, delivery target, credential or schema change. Existing incident rows keep the type they were written with; new failures classify correctly (a long-lived gateway picks the change up on its next start).
+
 ## 2026-11-09 20:06 (UTC) — cron: offline runs now retry until the network returns instead of skipping the period
 
 **Changes:**
