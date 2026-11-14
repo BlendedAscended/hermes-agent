@@ -45,6 +45,9 @@ def test_jev_guard_blocks_destructive_command_even_with_force(monkeypatch, stubb
     result = json.loads(terminal_module.terminal_tool("rm -rf /", force=True))
     assert result["status"] == "blocked"
     assert result["requires_human"] is True
+    assert result["block_type"] == "protected_path"
+    assert result["refusal_code"] == "protected_path"
+    assert "Protected path or destructive operation" in result["error"]
     assert stubbed_terminal == []
 
 
@@ -76,6 +79,7 @@ def test_jev_guard_blocks_layer2_verdict_from_automode_module(monkeypatch, stubb
             "source": "jev_engine",
             "reason": f"Jev flagged {cmd}",
             "requires_human": True,
+            "block_type": "protected_path",
         }
     )
     monkeypatch.setattr(jev_guard, "_load_automode_guard", lambda: fake_mod)
@@ -84,7 +88,60 @@ def test_jev_guard_blocks_layer2_verdict_from_automode_module(monkeypatch, stubb
     assert result["status"] == "blocked"
     assert result["source"] == "jev_engine"
     assert result["requires_human"] is True
+    assert result["block_type"] == "protected_path"
     assert stubbed_terminal == []
+
+
+def test_jev_guard_distinguishes_chained_delete_from_protected_path(monkeypatch, stubbed_terminal):
+    """Chained deletions guide workers to split commands (requires_human=False) instead of halting card."""
+    monkeypatch.setenv("HERMES_JEV_GUARD", "1")
+
+    # Chained delete: worker can recover by splitting command
+    result = json.loads(terminal_module.terminal_tool("npm test && rm -rf dist"))
+    assert result["status"] == "blocked"
+    assert result["block_type"] == "chained_delete"
+    assert result["refusal_code"] == "chained_delete"
+    assert result["requires_human"] is False
+    assert "Do not halt the card" in result["error"]
+    assert "Split the chained deletion" in result["error"]
+    assert stubbed_terminal == []
+
+    # Protected path: requires human approval
+    prot = json.loads(terminal_module.terminal_tool("rm -rf ~"))
+    assert prot["status"] == "blocked"
+    assert prot["block_type"] == "protected_path"
+    assert prot["refusal_code"] == "protected_path"
+    assert prot["requires_human"] is True
+    assert "Route destructive actions to human approval" in prot["error"]
+
+
+def test_jev_guard_fallback_dd_scoped_to_dev(monkeypatch, stubbed_terminal):
+    """Fallback critical patterns block dd only for /dev/ or missing of=, allowing /tmp fixtures."""
+    monkeypatch.setenv("HERMES_JEV_GUARD", "1")
+    # Force fallback path by pointing guard loader to non-existent module
+    monkeypatch.setattr(jev_guard, "_load_automode_guard", lambda: None)
+
+    # Allowed: writing fixture to /tmp
+    out = terminal_module.terminal_tool("dd if=/dev/urandom of=/tmp/fixture.bin bs=1M count=10")
+    assert out == "foreground-ran"
+    assert stubbed_terminal == ["dd if=/dev/urandom of=/tmp/fixture.bin bs=1M count=10"]
+
+    stubbed_terminal.clear()
+
+    # Blocked: writing to /dev/sda
+    blocked_dev = json.loads(terminal_module.terminal_tool("dd if=/dev/zero of=/dev/sda"))
+    assert blocked_dev["status"] == "blocked"
+    assert blocked_dev["block_type"] == "block_device_write"
+    assert blocked_dev["refusal_code"] == "block_device_write"
+    assert blocked_dev["requires_human"] is True
+    assert stubbed_terminal == []
+
+    # Blocked: missing of=
+    blocked_no_of = json.loads(terminal_module.terminal_tool("dd if=/dev/zero bs=512"))
+    assert blocked_no_of["status"] == "blocked"
+    assert blocked_no_of["block_type"] == "block_device_write"
+    assert blocked_no_of["refusal_code"] == "block_device_write"
+    assert blocked_no_of["requires_human"] is True
 
 
 def test_jev_guard_resolves_custom_script_in_hermes_home(monkeypatch, stubbed_terminal, tmp_path):
@@ -94,7 +151,7 @@ def test_jev_guard_resolves_custom_script_in_hermes_home(monkeypatch, stubbed_te
     script_path.write_text(
         "def check_command_safety(command, context=None, destructive_threshold=0.85, allow_network=None):\n"
         "    if 'custom-danger' in command:\n"
-        "        return {'allowed': False, 'risk_level': 'critical_destruction', 'source': 'hermes_home_script', 'reason': 'custom script block', 'requires_human': True}\n"
+        "        return {'allowed': False, 'risk_level': 'critical_destruction', 'source': 'hermes_home_script', 'reason': 'custom script block', 'requires_human': True, 'block_type': 'protected_path'}\n"
         "    return {'allowed': True, 'risk_level': 'read_only', 'source': 'hermes_home_script', 'reason': 'ok', 'requires_human': False}\n",
         encoding="utf-8",
     )
@@ -104,4 +161,3 @@ def test_jev_guard_resolves_custom_script_in_hermes_home(monkeypatch, stubbed_te
     assert blocked["status"] == "blocked"
     assert blocked["source"] == "hermes_home_script"
     assert terminal_module.terminal_tool("run safe") == "foreground-ran"
-
