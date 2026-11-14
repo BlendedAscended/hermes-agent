@@ -30,7 +30,24 @@ EXECUTIONS_FILE: Optional[Path] = None
 # ``resolved``: the job ran OK after the failure (auto); ``closed``: the operator acked the signature
 # and wants it silent. Only ``closed`` is terminal; a repeat of a resolved error re-opens it.
 INCIDENT_STATES = ("detected", "alerted", "resolved", "closed")
+# A resolver failure is not a slow endpoint. The error text NAMES the DNS problem, but the same
+# traceback also carries ``self.timeout`` (socket.create_connection's own source line) and the
+# caller's ``timeout=25``, so a keyword scan that reaches ``timeout`` first files a name-resolution
+# failure as a slow endpoint and sends triage the wrong way (job b9b7fcab8698, 2026-11-09: a
+# ``socket.gaierror`` from a DNS lookup was reported as ``timeout``). DNS markers are checked
+# BEFORE every other type, so the specific cause always wins over the incidental word. The marker
+# set mirrors ``classify_error`` in ``configs/hermes/scripts/frontier_discovery.py`` (ai-config-
+# transfer), which already named this failure correctly, plus the exception name itself.
+_DNS_FAILURE_MARKERS = (
+    "nodename nor servname",                 # macOS/BSD getaddrinfo (EAI_NONAME)
+    "name or service not known",             # Linux getaddrinfo (EAI_NONAME)
+    "temporary failure in name resolution",  # EAI_AGAIN
+    "no address associated with hostname",   # EAI_NODATA
+    "getaddrinfo failed",                    # Windows WSAHOST_NOT_FOUND
+    "gaierror",                              # the exception name, wherever it appears
+)
 _FAILURE_TYPE_ORDER = (
+    ("dns_resolution_failed", _DNS_FAILURE_MARKERS),
     ("rate_limit", (r"\b429\b", "rate limit", "usage limit", "quota")),
     ("timeout", ("timeout", "timed out")),
     ("auth", (r"\b401\b", "unauthorized", "authentication", "auth")),
@@ -139,7 +156,13 @@ def _incident_id(job_id: str, error_sig: str) -> str:
 
 
 def _classify_failure_type(error: str) -> str:
-    """Classify a failure from error-text keywords; ``unknown`` is the default."""
+    """Classify a failure from error-text keywords; ``unknown`` is the default.
+
+    Order decides ambiguous text, and it runs most-specific-first: ``dns_resolution_failed`` is
+    checked before ``timeout`` because a DNS traceback always contains the word ``timeout`` (both
+    ``socket.create_connection``'s ``self.timeout`` argument line and the caller's own timeout
+    keyword), so a looser ordering reports a resolver failure as a slow endpoint.
+    """
     text = _normalize_error(error)
     if not text:
         return "unknown"

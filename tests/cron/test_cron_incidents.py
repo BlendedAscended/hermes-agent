@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import socket
 import sys
+import traceback
+import urllib.error
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -182,6 +185,89 @@ def test_failure_type_classification(monkeypatch, tmp_path):
     ]
     for error, expected in cases:
         assert inc._classify_failure_type(error) == expected, (error, expected)
+
+
+# Job b9b7fcab8698 (weekly-self-evolving-singularity-matrix, 2026-11-09) died on a DNS lookup and
+# was filed as ``timeout``. This is the shape of that stderr: the resolver failure is named
+# unambiguously, but the SAME traceback also carries socket's own ``self.timeout`` argument line
+# and the caller's ``timeout=25``, so a keyword scan that reaches ``timeout`` first mislabels it.
+DNS_TRACEBACK = """Script exited with code 1
+stderr:
+Traceback (most recent call last):
+  File ".../urllib/request.py", line 1319, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File ".../urllib/request.py", line 1342, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+  File ".../urllib/request.py", line 1345, in do_open
+    r = h.getresponse()
+  File ".../socket.py", line 833, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+  File ".../socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+socket.gaierror: [Errno 8] nodename nor servname provided, or not known
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File ".../weekly_self_evolving_matrix.py", line 59, in _fetch_json
+    with urllib.request.urlopen(req, timeout=25) as resp:
+urllib.error.URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>
+"""
+
+
+def test_dns_failure_is_named_not_reported_as_timeout(monkeypatch, tmp_path):
+    """A resolver failure is a DNS failure, not a slow endpoint (t_6c3bd134)."""
+    inc = _point_db(monkeypatch, tmp_path)
+
+    # The trap this guards: the text really does say "timeout" as well.
+    assert "timeout" in DNS_TRACEBACK.lower()
+    assert inc._classify_failure_type(DNS_TRACEBACK) == "dns_resolution_failed"
+
+    # The exception objects themselves, rendered the way the scheduler receives them.
+    for exc in (
+        socket.gaierror(8, "nodename nor servname provided, or not known"),
+        urllib.error.URLError(
+            socket.gaierror(8, "nodename nor servname provided, or not known")
+        ),
+    ):
+        rendered = "".join(traceback.format_exception(exc))
+        assert inc._classify_failure_type(rendered) == "dns_resolution_failed", rendered
+
+    # The same resolver failure as spelled on other platforms/resolvers.
+    for message in (
+        "socket.gaierror: [Errno -2] Name or service not known",
+        "socket.gaierror: [Errno -3] Temporary failure in name resolution",
+        "OSError: [Errno 65] No address associated with hostname",
+        "gaierror: [Errno 11001] getaddrinfo failed",
+        "URLError: <urlopen error [Errno -2] Name or service not known>",
+    ):
+        assert inc._classify_failure_type(message) == "dns_resolution_failed", message
+
+
+def test_timeout_still_classifies_as_timeout(monkeypatch, tmp_path):
+    """Naming DNS failures must not swallow real timeouts."""
+    inc = _point_db(monkeypatch, tmp_path)
+
+    assert inc._classify_failure_type("Provider read timed out after 60s") == "timeout"
+    assert inc._classify_failure_type("Request timeout after 25s") == "timeout"
+    # ``socket.timeout`` is an alias of ``TimeoutError`` (3.10+), so these two cover both names.
+    for exc in (
+        TimeoutError("timed out"),
+        urllib.error.URLError(TimeoutError("timed out")),
+    ):
+        rendered = "".join(traceback.format_exception(exc))
+        assert inc._classify_failure_type(rendered) == "timeout", rendered
+
+
+def test_dns_incident_row_records_dns_resolution_failed(monkeypatch, tmp_path):
+    """The stored incident carries the corrected type, not just the helper's return value."""
+    inc = _point_db(monkeypatch, tmp_path)
+
+    incident_id, _ = inc.upsert_incident("b9b7fcab8698", DNS_TRACEBACK)
+
+    row = inc.get_incident(incident_id)
+    assert row is not None
+    assert row["failure_type"] == "dns_resolution_failed"
 
 
 # ── Lifecycle / ack ────────────────────────────────────────────────────────
