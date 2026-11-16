@@ -18,6 +18,36 @@ The cron subsystem provides scheduled task execution — from simple one-shot de
 | `gateway/run.py` | Gateway integration — cron ticking in the long-running loop |
 | `hermes_cli/cron.py` | CLI `hermes cron` subcommands |
 
+## Shared outbound delivery
+
+A credentialless profile can send a scheduled report through its serving primary
+gateway without claiming the report channel's inbound conversations. In the
+primary home's `config.yaml`, declare an exact grant:
+
+```yaml
+cron:
+  shared_delivery_targets:
+    - name: delivery-report
+      profile: delivery
+      platform: slack
+      chat_id: "CHANNEL_ID"
+```
+
+The scheduler checks the same grant during preflight and transport resolution.
+It requires the native multiplexer liveness probe, matching runtime PID, a fresh
+runtime record, the served profile and a connected primary transport. A missing
+or stale observation grants nothing. The profile keeps its own credentials
+unset. This list never enters `profile_routes`, so it cannot move inbound
+conversations to another profile.
+
+A channel grant excludes threads. Add an exact `thread_id` to grant one thread;
+that grant excludes the channel and every other thread. Unsupported fields,
+disabled entries and entries without a quoted `chat_id` grant nothing. Supported
+fields are `name`, `profile`, `platform`, `chat_id`, `thread_id` and `enabled`.
+After activating a new scheduler build, inspect the next scheduled execution's
+delivery receipt. Config and preflight acceptance alone do not prove a report
+was delivered.
+
 ## Scheduling Model
 
 Four schedule formats are supported:
