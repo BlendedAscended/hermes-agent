@@ -145,7 +145,8 @@ def _primary_profile_routes_for_current_home() -> list:
     holding its own token is a ``duplicate_credential`` fatal). Reads the primary home's YAML
     layers (user file + managed-scope overlay, top-level or nested ``gateway.``) through the same
     loader ``load_gateway_config()`` uses, without bridging platform config into this process.
-    Shared by preflight rescue and delivery-time resolution so they cannot drift.
+    Shared by preflight rescue and delivery-time resolution so they cannot drift. Exact
+    ``cron.shared_delivery_targets`` add outbound grants without changing inbound ownership.
 
     Under ``gateway.multiplex_profiles`` a satellite profile's cron jobs are ticked by the primary gateway's
     in-process ticker (#69377) and delivered through the primary gateway's live adapters — the satellite
@@ -172,7 +173,12 @@ def _primary_route_tables_for_current_home():
 
         from hermes_cli.profiles import profile_matches_home
         routes = _primary_routes(primary_home)
-        return ([route for route in routes if route.enabled and profile_matches_home(route.profile)],
+        this_profile_routes = [route for route in routes
+                               if route.enabled and profile_matches_home(route.profile)]
+        from cron.shared_delivery import primary_outbound_routes
+        layered = _primary_route_layers(primary_home)
+        this_profile_routes.extend(primary_outbound_routes(layered, current_home))
+        return (this_profile_routes,
                 [route for route in routes if route.enabled and route.bot_profile is None])
     except Exception:
         logger.debug("primary-gateway profile-route lookup unavailable", exc_info=True)
@@ -206,6 +212,17 @@ def _primary_routes(primary_home) -> list:
     return parse_profile_routes(routes_raw)
 
 
+def _primary_route_layers(primary_home) -> dict:
+    """Read primary YAML layers under the primary profile's secret scope."""
+    from gateway.config_loader import read_yaml_layers
+    from agent.runtime_scope import bind_state, scope_for_profile
+    from agent.secret_scope import _is_process_home
+
+    with bind_state(scope_for_profile(primary_home), hydrate_secrets=False, terminal=False,
+                    stamp_home=not _is_process_home(primary_home)):
+        return read_yaml_layers(primary_home.expanduser())
+
+
 def _delivery_platform_routed_from_primary_gateway(platform_name: str) -> bool:
     """True when the primary gateway routes this platform to the profile being served.
 
@@ -228,7 +245,7 @@ _READ_DISPATCH_ROUTES = object()  # default: read the primary home's table; None
 
 class SharedRouteAdapters:
     """Read-only adapter map for a credentialless satellite profile. ``get(platform, target)``
-    resolves the PRIMARY adapter iff the inbound route matcher (``ProfileRoute.matches``) accepts
+    resolves the PRIMARY adapter iff the authorized route matcher accepts
     the target; anything else (unmatched target, disabled route, other profile, or target-less
     ``get(platform)``) is a miss — fail closed, never the default bot. ``dispatch_routes`` are the
     shared bot's routes for every profile (default: the primary home's; ``None`` — the read failed —
@@ -319,6 +336,16 @@ def has_credential_platform(adapters, owned=None) -> bool:
         getattr(platform, "value", platform) != "local" for platform in adapters or ())
 
 
+def _delivery_target_routed_from_primary_gateway(job: dict, platform_name: str, part: str) -> bool:
+    """Use delivery's native target resolver and exact transport authorization before model work."""
+    target = _delivery._resolve_single_delivery_target(job, part)
+    if target is None:
+        return False
+    sentinel = object()
+    shared = shared_route_adapters_for_current_home({platform_name: sentinel})
+    return shared.get(platform_name, target) is sentinel
+
+
 def _preflight_check_delivery(job: dict) -> Optional[str]:
     """Check delivery targets resolve to configured platforms. ``local``/``origin``/``all`` are
     never checked (no gateway-config load). Unknown platform always blocks; known platform blocks
@@ -331,7 +358,7 @@ def _preflight_check_delivery(job: dict) -> Optional[str]:
     lane_values = [deliver_value]
     if failure_deliver_value != deliver_value:
         lane_values.append(failure_deliver_value)
-    platform_parts: list[str] = []
+    platform_parts: list[tuple[str, str]] = []
     for lane_value in lane_values:
         for part in lane_value.split(","):
             part = part.strip()
@@ -342,12 +369,12 @@ def _preflight_check_delivery(job: dict) -> Optional[str]:
                 continue
             if _delivery.parse_room_deliver_token(part) is not None:
                 continue  # Group Chat posts write the room store directly; no adapter needed.
-            platform_parts.append(part.split(":", 1)[0].strip())
+            platform_parts.append((part.split(":", 1)[0].strip(), part))
     if not platform_parts:
         return None
 
     connected: Optional[set] = None
-    for platform_name in platform_parts:
+    for platform_name, part in platform_parts:
         if not _delivery._is_known_delivery_platform(platform_name):
             return (
                 f"delivery platform '{platform_name}' is not a known cron "
@@ -371,7 +398,7 @@ def _preflight_check_delivery(job: dict) -> Optional[str]:
             # Multiplex escape hatch: a satellite profile whose deliveries are routed by the primary
             # gateway's profile_routes is served by the primary's adapters, so its own unconnected reading
             # is a false block (#97476).
-            and not _delivery_platform_routed_from_primary_gateway(platform_name)
+            and not _delivery_target_routed_from_primary_gateway(job, platform_name, part)
         ):
             return (
                 f"delivery platform '{platform_name}' has no gateway "
