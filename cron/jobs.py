@@ -3129,6 +3129,7 @@ def _fast_forward_missed_recurring(d: _DueJob, grace: int) -> bool:
         return False
     d.scan.persist(d.job["id"], next_run_at=new_next)
     if (_instant_after(_ensure_aware(datetime.fromisoformat(new_next)), d.scan.now)
+            and d.job.get("window_deferred_slot") != d.next_run
             and not _cron_config_number("catch_up_missed", True, lambda value: value is not False)):
         logger.info(
             "Job '%s' missed its scheduled time (%s, grace=%ds). "
@@ -3152,6 +3153,8 @@ def _retire_expired_oneshot(d: _DueJob) -> bool:
     and recovery never revives them; only the due scan used to dispatch them hours late). With no
     claim stamped, retire it with a diagnostic (never silently delete). A claim may mean a run is
     still in flight elsewhere — skip but keep the record so its mark_job_run can land."""
+    if d.job.get("window_deferred_slot") == d.next_run:
+        return False
     if _elapsed_seconds(d.scan.now, d.next_run_dt) <= ONESHOT_GRACE_SECONDS:
         return False
     # Due during an outage of its store: it was skipped, not missed; fire it once on recovery.
@@ -3252,6 +3255,17 @@ def _evaluate_due_job(job: dict[str, Any], scan: _DueScan, run_claim_ttl: float)
     if not next_run:
         return False
     raw_next_run_dt = datetime.fromisoformat(next_run)
+    # Manual triggers are explicit user actions, not scheduled dispatches.
+    manual_window_run = job.get("manual_run_at") == next_run
+    from cron.operating_window import deferred_across_closed_window, scheduled_dispatch_allowed
+    if not manual_window_run and not scheduled_dispatch_allowed(now):
+        if not _instant_after(_ensure_aware(raw_next_run_dt), now):
+            if job.get("window_deferred_slot") != next_run:
+                scan.persist(job["id"], window_deferred_slot=next_run)
+        return False
+    if not manual_window_run and deferred_across_closed_window(_ensure_aware(raw_next_run_dt), now):
+        job["window_deferred_slot"] = next_run
+        scan.persist(job["id"], window_deferred_slot=next_run)
     d = _DueJob(job, scan, next_run, raw_next_run_dt, _ensure_aware(raw_next_run_dt))
     kind = d.kind
     recurring = kind in {"cron", "interval"}
@@ -3313,6 +3327,8 @@ def _evaluate_due_job(job: dict[str, Any], scan: _DueScan, run_claim_ttl: float)
         scan.persist(
             job["id"], last_dispatch=dispatch_stamp,
             pending_slot=pending_slot_stamp(next_run, now))
+    if job.get("window_deferred_slot") == next_run:
+        scan.persist(job["id"], window_deferred_slot=None)
     return True
 
 
