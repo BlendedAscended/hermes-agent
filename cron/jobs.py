@@ -3078,6 +3078,63 @@ def _reanchor_stale_cron(d: _DueJob) -> bool:
     return False
 
 
+def _fast_forward_missed_recurring(d: _DueJob, grace: int) -> bool:
+    """Re-anchor accumulated misses; return whether catch-up was explicitly disabled.
+
+    The fast-forward is persisted immediately — NOT redundant with advance_next_run/mark_job_run:
+    it
+    protects the crash window before mark_job_run and covers the external fire_due path, which never
+    calls advance_next_run. mark_job_run re-anchors on completion, so the value is provisional.
+    """
+    if _elapsed_seconds(d.scan.now, d.next_run_dt) <= grace:
+        return False
+    new_next = d.recompute_next()
+    if not new_next:
+        return False
+    d.scan.persist(d.job["id"], next_run_at=new_next)
+    if (_instant_after(_ensure_aware(datetime.fromisoformat(new_next)), d.scan.now)
+            and d.job.get("window_deferred_slot") != d.next_run
+            and not _cron_config_number("catch_up_missed", True, lambda value: value is not False)):
+        logger.info(
+            "Job '%s' missed its scheduled time (%s, grace=%ds). "
+            "Skipping missed occurrence because cron.catch_up_missed is false; next run: %s",
+            d.label, d.next_run, grace, new_next)
+        d.scan.on_saved.append(lambda job=d.job: record_cron_missed(job))
+        return True
+    logger.info(
+        "Job '%s' missed its scheduled time (%s, grace=%ds). "
+        "Running now; next run provisionally set to: %s (re-anchored on completion)",
+        d.label, d.next_run, grace, new_next)
+    from cron.occurrences import record_catch_up_occurrence
+    d.scan.on_saved.append(record_catch_up_occurrence)
+    return False
+
+
+def _retire_expired_oneshot(d: _DueJob) -> bool:
+    """One-shot grace gate; True when the job must not fire this tick.
+
+    A one-shot beyond the grace window must never fire (create/update/resume reject such schedules
+    and recovery never revives them; only the due scan used to dispatch them hours late). With no
+    claim stamped, retire it with a diagnostic (never silently delete). A claim may mean a run is
+    still in flight elsewhere — skip but keep the record so its mark_job_run can land."""
+    if d.job.get("window_deferred_slot") == d.next_run:
+        return False
+    if _elapsed_seconds(d.scan.now, d.next_run_dt) <= ONESHOT_GRACE_SECONDS:
+        return False
+    # Due during an outage of its store: it was skipped, not missed; fire it once on recovery.
+    if store_health.outage_covers(_current_cron_store().cron_dir, d.next_run_dt.timestamp(), ONESHOT_GRACE_SECONDS):
+        return False
+    claim = d.job.get("run_claim")
+    # An outage-covered claim that never reached its fire claim never started: it stays covered.
+    if isinstance(claim, dict) and claim.get("outage") and not d.job.get("fire_claim"):
+        return False
+    if not (claim or d.job.get("fire_claim")):
+        _write_missed_oneshot_diagnostic(d.job, d.next_run)
+        d.scan.retire(d.job["id"])
+        d.scan.on_saved.append(lambda job=d.job: record_cron_missed(job))
+    return True
+
+
 def _oneshot_dispatch_limit_reached(job: dict[str, Any], scan: _DueScan) -> bool:
     """One-shot dispatch-limit guard; True when the job must not fire this tick.
 
@@ -3168,6 +3225,17 @@ def _evaluate_due_job(job: dict[str, Any], scan: _DueScan, run_claim_ttl: float)
     zone = jobs_time.zone_for_job(job)
     raw_next_run_dt = datetime.fromisoformat(next_run)
     d = _DueJob(job, scan, next_run, raw_next_run_dt, _ensure_aware(raw_next_run_dt, zone))
+    # Manual triggers are explicit user actions, not scheduled dispatches.
+    manual_window_run = job.get("manual_run_at") == next_run
+    from cron.operating_window import deferred_across_closed_window, scheduled_dispatch_allowed
+    if not manual_window_run and not scheduled_dispatch_allowed(now):
+        if not _instant_after(_ensure_aware(raw_next_run_dt, zone), now):
+            if job.get("window_deferred_slot") != next_run:
+                scan.persist(job["id"], window_deferred_slot=next_run)
+        return False
+    if not manual_window_run and deferred_across_closed_window(_ensure_aware(raw_next_run_dt, zone), now):
+        job["window_deferred_slot"] = next_run
+        scan.persist(job["id"], window_deferred_slot=next_run)
     kind = d.kind
     recurring = kind in {"cron", "interval"}
     # Intentionally string-exact on raw stored values: trigger_job stamps the SAME isoformat string
@@ -3233,6 +3301,8 @@ def _evaluate_due_job(job: dict[str, Any], scan: _DueScan, run_claim_ttl: float)
         scan.persist(
             job["id"], last_dispatch=dispatch_stamp,
             pending_slot=pending_slot_stamp(next_run, now))
+    if job.get("window_deferred_slot") == next_run:
+        scan.persist(job["id"], window_deferred_slot=None)
     return True
 
 

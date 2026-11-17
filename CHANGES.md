@@ -1,3 +1,10 @@
+## 2026-11-17 03:39 (UTC) — Add optional operating windows for scheduled dispatch
+
+**Changes:**
+- Defer scheduled Hermes jobs outside configured local windows without terminating in flight work.
+- Preserve eligible missed and one time occurrences across closed windows and host sleep.
+- Add boundary, daylight saving, manual trigger and deferred recovery tests.
+
 ## 2026-11-14 17:46 (UTC) — cron: a DNS resolution failure is named `dns_resolution_failed`, not `timeout`
 
 **Changes:**
