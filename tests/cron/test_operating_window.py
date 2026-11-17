@@ -81,6 +81,42 @@ def test_external_scheduler_cannot_claim_outside_window(window_store, monkeypatc
     assert jobs.claim_job_for_fire("windowjob", manual=True) is True
 
 
+def test_boundary_claim_preserves_the_pending_occurrence(window_store, monkeypatch):
+    closed = datetime.fromisoformat("2026-11-16T20:00:00+00:00")
+    slot = closed - timedelta(seconds=1)
+    monkeypatch.setattr(jobs, "_hermes_now", lambda: closed)
+    job = _job("interval", closed + timedelta(hours=1),
+               pending_slot={"scheduled_at": slot.isoformat(), "at": slot.isoformat(), "by": "test"})
+    jobs.save_jobs([job])
+    assert jobs.claim_job_for_fire("windowjob") is False
+    stored = jobs.load_jobs()[0]
+    assert stored["window_deferred_slot"] == slot.isoformat()
+    assert stored["pending_slot"]["scheduled_at"] == slot.isoformat()
+
+
+def test_scheduler_defers_housekeeping_and_queued_delivery(window_store, monkeypatch):
+    from cron import bot_chat_delivery, scheduler, scheduler_tick, store_health
+
+    calls = []
+    now = datetime.fromisoformat("2026-11-16T20:10:00+00:00")
+    monkeypatch.setattr(scheduler, "_hermes_now", lambda: now)
+    monkeypatch.setattr(scheduler, "_should_yield_tick_to_fresh_gateway", lambda: None)
+    monkeypatch.setattr(scheduler_tick, "_acquire_tick_lock_or_degrade", lambda _sched: 1)
+    monkeypatch.setattr(scheduler, "_release_tick_lock", lambda _fd: None)
+    monkeypatch.setattr(scheduler, "_maybe_reap_dead_owners", lambda: None)
+    monkeypatch.setattr(scheduler, "_sweep_stale_inflight_for_tick", lambda _jobs: None)
+    monkeypatch.setattr(scheduler, "_sweep_mcp_orphans", lambda: None)
+    monkeypatch.setattr(store_health, "recheck_idle", lambda: None)
+    monkeypatch.setattr(scheduler, "get_due_jobs", list)
+    monkeypatch.setattr(bot_chat_delivery, "drain", lambda: calls.append("delivery"))
+    monkeypatch.setattr(scheduler, "_maybe_run_worktree_maintenance", lambda: calls.append("maintenance"))
+    assert scheduler_tick._tick_admitted(verbose=False) == 0
+    assert calls == []
+    now = datetime.fromisoformat("2026-11-16T21:00:00+00:00")
+    assert scheduler_tick._tick_admitted(verbose=False) == 0
+    assert calls == ["delivery", "maintenance"]
+
+
 def test_one_shot_recovers_if_host_slept_through_the_closed_window(window_store, monkeypatch):
     scheduled = datetime.fromisoformat("2026-11-16T20:10:00+00:00")
     monkeypatch.setattr(jobs, "_hermes_now", lambda: datetime.fromisoformat("2026-11-16T21:00:00+00:00"))

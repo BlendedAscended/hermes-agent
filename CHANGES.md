@@ -1,3 +1,10 @@
+## 2026-11-17 03:46 (UTC) — Fence scheduled housekeeping and boundary claims
+
+**Changes:**
+- Apply the optional operating window to queued chat delivery and worktree maintenance during scheduler ticks.
+- Preserve the original pending occurrence when a claim arrives after the window closes.
+- No policy is enabled by this change.
+
 ## 2026-11-17 03:41 (UTC) — Fence external scheduled fire claims at window boundaries
 
 **Changes:**
