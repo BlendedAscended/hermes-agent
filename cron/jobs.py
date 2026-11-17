@@ -2754,6 +2754,15 @@ def claim_job_for_fire(
         if not force and not is_job_runnable(job):
             return False
         now = _hermes_now()
+        manual_fire = force or manual or job.get("manual_run_at") == job.get("next_run_at")
+        from cron.operating_window import scheduled_dispatch_allowed
+        if not manual_fire and not scheduled_dispatch_allowed(now):
+            slot = job.get("next_run_at")
+            parsed_slot = _parse_aware(slot)
+            if parsed_slot and not _instant_after(parsed_slot, now) and job.get("window_deferred_slot") != slot:
+                job["window_deferred_slot"] = slot
+                save_jobs(jobs)
+            return False
         if _claim_is_live(job.get("fire_claim"), now, claim_ttl_seconds):
             return False  # someone holds a fresh claim
         from cron.occurrences import completed_occurrence, scheduled_instant
@@ -2761,7 +2770,6 @@ def claim_job_for_fire(
         # ``manual`` (an off-tick run-now) must NOT stamp an occurrence identity: outside a
         # scheduler tick ``next_run_at`` is the NEXT occurrence, not the one being run, so
         # stamping it would make completed_occurrence() skip that slot when it arrives.
-        manual_fire = force or manual or job.get("manual_run_at") == job.get("next_run_at")
         instant = None if manual_fire else scheduled_instant(job.get("next_run_at"))
         # A scheduled tick only ever fires when now >= next_run_at
         # (_evaluate_due_job returns False while the stored occurrence is still

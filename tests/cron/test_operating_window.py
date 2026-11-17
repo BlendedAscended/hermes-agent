@@ -69,6 +69,18 @@ def test_manual_trigger_remains_available(window_store, monkeypatch):
     assert [job["id"] for job in jobs.get_due_jobs()] == ["windowjob"]
 
 
+def test_external_scheduler_cannot_claim_outside_window(window_store, monkeypatch):
+    blocked = datetime.fromisoformat("2026-11-16T20:10:00+00:00")
+    monkeypatch.setattr(jobs, "_hermes_now", lambda: blocked)
+    jobs.save_jobs([_job("interval", blocked)])
+    assert jobs.claim_job_for_fire("windowjob") is False
+    stored = jobs.load_jobs()[0]
+    assert stored["next_run_at"] == blocked.isoformat()
+    assert stored["window_deferred_slot"] == blocked.isoformat()
+    assert not stored.get("fire_claim")
+    assert jobs.claim_job_for_fire("windowjob", manual=True) is True
+
+
 def test_one_shot_recovers_if_host_slept_through_the_closed_window(window_store, monkeypatch):
     scheduled = datetime.fromisoformat("2026-11-16T20:10:00+00:00")
     monkeypatch.setattr(jobs, "_hermes_now", lambda: datetime.fromisoformat("2026-11-16T21:00:00+00:00"))

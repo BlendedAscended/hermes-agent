@@ -1,3 +1,9 @@
+## 2026-11-17 03:41 (UTC) — Fence external scheduled fire claims at window boundaries
+
+**Changes:**
+- Prevent external scheduler callbacks from starting scheduled jobs in closed windows.
+- Preserve explicit manual runs and defer an already due occurrence for later recovery.
+
 ## 2026-11-17 03:39 (UTC) — Add optional operating windows for scheduled dispatch
 
 **Changes:**
