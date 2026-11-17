@@ -2757,7 +2757,8 @@ def claim_job_for_fire(
         manual_fire = force or manual or job.get("manual_run_at") == job.get("next_run_at")
         from cron.operating_window import scheduled_dispatch_allowed
         if not manual_fire and not scheduled_dispatch_allowed(now):
-            slot = job.get("next_run_at")
+            pending = job.get("pending_slot")
+            slot = pending.get("scheduled_at") if isinstance(pending, dict) else job.get("next_run_at")
             parsed_slot = _parse_aware(slot)
             if parsed_slot and not _instant_after(parsed_slot, now) and job.get("window_deferred_slot") != slot:
                 job["window_deferred_slot"] = slot

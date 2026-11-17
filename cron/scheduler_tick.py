@@ -100,17 +100,21 @@ def _tick_admitted(
             _sched.logger.debug("Cron dispatch paused while gateway drains existing work")
             return 0
 
-        from cron.bot_chat_delivery import drain, drain_in_background
-        if sync:
-            drain()
-        else:
-            drain_in_background()
+        from cron.operating_window import scheduled_dispatch_allowed
+        window_open = scheduled_dispatch_allowed(_sched._hermes_now())
+        if window_open:
+            from cron.bot_chat_delivery import drain, drain_in_background
+            if sync:
+                drain()
+            else:
+                drain_in_background()
         _sched._maybe_reap_dead_owners()
         # Periodic worktree GC (6h, threaded) — the only sweep gateway-only boxes get.
-        try:
-            _sched._maybe_run_worktree_maintenance()
-        except Exception as _wt_exc:
-            _sched.logger.debug("Worktree maintenance dispatch failed: %s", _wt_exc)
+        if window_open:
+            try:
+                _sched._maybe_run_worktree_maintenance()
+            except Exception as _wt_exc:
+                _sched.logger.debug("Worktree maintenance dispatch failed: %s", _wt_exc)
 
         due_jobs = _sched.get_due_jobs()
         _sched._sweep_stale_inflight_for_tick(due_jobs)
