@@ -183,6 +183,10 @@ def bind_worker_context(frame):
             env[key] = value
     if context['goal_mode']:
         env['HERMES_KANBAN_GOAL_MODE'] = '1'
+    # kanban_db must load before kanban_db_dispatch: dispatch -> heartbeat -> kanban_db
+    # -> "from kanban_db_dispatch import DEFAULT_FAILURE_LIMIT" fails on a half-loaded
+    # dispatch module when dispatch is the first kanban module imported in a cold worker.
+    from hermes_cli import kanban_db as _kb_first
     from hermes_cli.kanban_db_dispatch import _worker_terminal_timeout_env
     for key in ('TERMINAL_TIMEOUT', 'TERMINAL_MAX_FOREGROUND_TIMEOUT'):
         value = _worker_terminal_timeout_env(context['max_runtime_seconds'], os.environ.get(key))
@@ -224,6 +228,7 @@ def _watch_submitter(db, run_id):
     Exiting hard leaves no ``worker_result``, so the dead-worker sweep books this run's crash.
     The run row is re-read each tick: the dispatcher records the pid only after its spawn returns."""
     import os
+    from hermes_cli import kanban_db as _kb_first  # load before dispatch, see bind_worker_context
     from hermes_cli.kanban_db_dispatch import _worker_alive
 
     def watch():
