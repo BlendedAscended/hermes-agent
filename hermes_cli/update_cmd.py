@@ -1356,6 +1356,17 @@ def _prepare_checkout_for_update(
     if release_tag:
         # A release lands detached at its exact commit, never merges into or
         # rewrites the user's branch. Branch-policy machinery is main-only.
+        # An explicit opt-out still protects a checkout parked on a feature branch;
+        # do not let the release path bypass the user's choice and detach HEAD.
+        if current_branch != branch:
+            try:
+                auto_switch_parked = _updates_config().get("auto_switch_parked_branch", True)
+            except Exception:
+                auto_switch_parked = True
+            if not auto_switch_parked:
+                _apply_parked_branch_guard(
+                    git_cmd, branch, current_branch, switch_branch=switch_branch,
+                    _windows_gateway_resume=_windows_gateway_resume)
         parked_branch_switched, in_place_update, switch_block_reason = False, True, None
     else:
         parked_branch_switched, in_place_update, switch_block_reason = _apply_parked_branch_guard(

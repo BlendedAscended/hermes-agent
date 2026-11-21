@@ -33,6 +33,11 @@ def _commit(repo, name, text):
 @pytest.fixture()
 def detached_work(tmp_path, monkeypatch):
     """A checkout detached at ``origin/main~1`` carrying a commit that no ref contains."""
+    # This source checkout lives beneath the operator's Hermes home. Its parent is not a PM
+    # install, so importing the CLI must not probe that real sibling manifest during the test.
+    import pm.environments
+
+    monkeypatch.setattr(pm.environments, "_payload_manifest", lambda _root: None)
     upstream = tmp_path / "upstream"
     upstream.mkdir()
     _git(upstream, "init", "-q", "-b", "main")
@@ -86,3 +91,22 @@ def test_release_update_from_detached_head_parks_only_unreachable_work(detached_
                              discard_local_changes=False, keep_stash=False, target_ref=release)
     backups = _git(checkout, "for-each-ref", "--format=%(refname)", "refs/hermes-update-backups/").stdout.split()
     assert len(backups) == 1, f"a detached HEAD already on a branch must not get a backup ref: {backups}"
+
+
+def test_release_tag_respects_parked_branch_opt_out(detached_work, monkeypatch, capsys):
+    """A stable release cannot detach a parked checkout when the user disabled auto-switching."""
+    checkout, _work, release = detached_work
+    _git(checkout, "checkout", "-qb", "fleet-py311-pin")
+    before = _git(checkout, "rev-parse", "HEAD").stdout.strip()
+    from hermes_cli import config
+    monkeypatch.setattr(config, "load_config", lambda: {"updates": {"auto_switch_parked_branch": False}})
+
+    with pytest.raises(SystemExit):
+        update_cmd._prepare_checkout_for_update(
+            GIT, "main", "fleet-py311-pin", is_fork=False, assume_yes=True,
+            gateway_mode=False, gw_input_fn=None, switch_branch=False,
+            target_ref=release, _windows_gateway_resume=None)
+
+    assert _git(checkout, "branch", "--show-current").stdout.strip() == "fleet-py311-pin"
+    assert _git(checkout, "rev-parse", "HEAD").stdout.strip() == before
+    assert "code update SKIPPED" in capsys.readouterr().out
