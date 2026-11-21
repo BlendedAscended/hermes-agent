@@ -50,6 +50,31 @@ _CONFIG_SCHEMA_TYPES: dict[str, tuple] = {
     "secret": (str,),
 }
 
+# Parsed documents are immutable by convention and only read while manifests are rebuilt.
+_MANIFEST_DOC_CACHE: dict[tuple[str, tuple], Mapping] = {}
+_MANIFEST_DOC_CACHE_MAX = 4096
+
+
+def _read_manifest_document(manifest_file: Path) -> Any:
+    """Read a manifest once per file revision; callers build fresh manifest objects from it."""
+    from utils import file_signature
+
+    try:
+        signature = file_signature(manifest_file.stat())
+    except OSError:
+        signature = None
+    key = (str(manifest_file), signature)
+    if signature is not None:
+        cached = _MANIFEST_DOC_CACHE.get(key)
+        if cached is not None:
+            return cached
+    data = fast_safe_load(manifest_file.read_text(encoding="utf-8-sig")) or {}
+    if signature is not None and isinstance(data, Mapping):
+        if len(_MANIFEST_DOC_CACHE) >= _MANIFEST_DOC_CACHE_MAX:
+            _MANIFEST_DOC_CACHE.clear()
+        _MANIFEST_DOC_CACHE[key] = data
+    return data
+
 
 def _plugins_debug() -> bool:
     from hermes_cli import plugins as _origin
@@ -556,7 +581,7 @@ def parse_manifest_file(
         if yaml is None:
             logger.warning("ruamel.yaml not installed – cannot load %s", manifest_file)
             return None
-        data = fast_safe_load(manifest_file.read_text(encoding="utf-8-sig")) or {}
+        data = _read_manifest_document(manifest_file)
         if not isinstance(data, Mapping):
             logger.warning("Failed to parse %s: top level must be a mapping, got %s (#14066)",
                            manifest_file, type(data).__name__)

@@ -675,20 +675,20 @@ _YAML_FILE_CACHE: dict = {}
 _YAML_FILE_CACHE_LOCK = threading.Lock()
 
 
-def load_yaml_file_readonly(path: str | Path) -> Any:
+def load_yaml_file_readonly(path: str | Path, *, encoding: str = "utf-8") -> Any:
     """``fast_safe_load`` of a file, re-parsed only when its :func:`file_cache_version` changes.
 
     Returns the cached object itself — callers must never mutate it. Parse errors propagate and
     are not cached; a missing file raises ``FileNotFoundError`` like ``open`` does."""
     path = Path(path)
     sig = file_cache_version(path)
-    key = str(path)
+    key = (str(path), sig, encoding)
     with _YAML_FILE_CACHE_LOCK:
         cached = _YAML_FILE_CACHE.get(key)
-        if cached is not None and cached[0] == sig:
-            return cached[1]
-    with open(path, encoding="utf-8") as f:
+        if cached is not None:
+            return cached
+    with open(path, encoding=encoding) as f:
         data = fast_safe_load(f)
     with _YAML_FILE_CACHE_LOCK:
-        _YAML_FILE_CACHE[key] = (sig, data)
+        _YAML_FILE_CACHE[key] = data
     return data

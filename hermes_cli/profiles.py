@@ -719,8 +719,9 @@ def _read_config_model(profile_dir: Path) -> tuple:
     def _read() -> tuple:
         try:
             # load_config() targets the ACTIVE profile's home; read THIS profile's file raw.
-            from hermes_cli.config import read_user_config_raw
-            model_cfg = read_user_config_raw(config_path).get("model", {})
+            from hermes_cli.config_backend import read_config_doc_readonly
+            raw = read_config_doc_readonly(config_path) or {}
+            model_cfg = raw.get("model", {}) if isinstance(raw, dict) else {}
             if isinstance(model_cfg, str):
                 return model_cfg, None
             if isinstance(model_cfg, dict):
@@ -1044,9 +1045,11 @@ def profile_is_standalone(home: Path) -> bool:
         return cached[1]
     value = None
     if signature is not None:
-        from hermes_cli.config import read_user_config_raw
+        from hermes_cli.config_backend import read_config_doc_readonly
         try:
-            cfg = read_user_config_raw(cfg_path) or {}
+            cfg = read_config_doc_readonly(cfg_path) or {}
+            if not isinstance(cfg, dict):
+                cfg = {}
         except (YAMLError, OSError, UnicodeError) as exc:
             if cached is None or cached[0] != signature:
                 logger.warning("Cannot read gateway.standalone from %s (%s); treating as not standalone",

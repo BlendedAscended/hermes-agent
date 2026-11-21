@@ -29,6 +29,34 @@ def _flatten(d, prefix="") -> dict:
     return flat
 
 
+def test_bundled_locale_cache_is_signature_keyed_and_returns_copies(monkeypatch, tmp_path):
+    locale = tmp_path / "en.yaml"
+    locale.write_text("hello: world\n", encoding="utf-8")
+    monkeypatch.setattr(i18n, "_locales_dir", lambda: tmp_path)
+    i18n.reset_language_cache()
+    parsed = []
+
+    def parse(path):
+        parsed.append(path)
+        return {"hello": "world"}
+
+    monkeypatch.setattr(i18n.i18n_layers, "parse_locale_file", parse)
+    first = i18n._load_bundled("en")
+    first["hello"] = "caller mutation"
+    second = i18n._load_bundled("en")
+
+    assert second == {"hello": "world"}
+    assert second is not first
+    assert parsed == [locale]
+
+    locale.write_text("hello: changed\n", encoding="utf-8")
+    import os
+    stat = locale.stat()
+    os.utime(locale, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+    monkeypatch.setattr(i18n.i18n_layers, "parse_locale_file", lambda _path: {"hello": "changed"})
+    assert i18n._load_bundled("en") == {"hello": "changed"}
+
+
 # ---------------------------------------------------------------------------
 # Catalog completeness -- this is the key invariant test.  If someone adds a
 # new key to en.yaml they MUST add it to every other locale, else runtime

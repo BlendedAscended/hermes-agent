@@ -66,6 +66,9 @@ _LANGUAGE_ALIASES: dict[str, str] = {
 # (home, lang) -> merged catalog (packs over overlay over bundled). home -> supported tuple.
 _catalog_cache: dict[tuple[str, str], dict[str, str]] = {}
 _supported_cache: dict[str, tuple[str, ...]] = {}
+# Bundled catalogs are shared across profile homes; cache each file revision once.
+_bundled_cache: dict[tuple[str, tuple], dict[str, str]] = {}
+_BUNDLED_CACHE_MAX = 128
 _catalog_lock = threading.Lock()
 
 
@@ -154,14 +157,27 @@ def _normalize_lang(value: Any, home: str | None = None) -> str:
 def _load_bundled(lang: str) -> dict[str, str]:
     """One bundled locale YAML flattened to dotted keys (empty dict on any failure — never crashes)."""
     path = _locales_dir() / f"{lang}.yaml"
-    if not path.is_file():
+    from utils import file_signature
+    try:
+        signature = file_signature(path.stat())
+    except OSError:
         logger.debug("i18n catalog missing for %s at %s", lang, path)
         return {}
+    key = (str(path), signature)
+    with _catalog_lock:
+        cached = _bundled_cache.get(key)
+    if cached is not None:
+        return dict(cached)
     try:
-        return i18n_layers.parse_locale_file(path)
+        parsed = i18n_layers.parse_locale_file(path)
     except Exception as exc:
         logger.warning("Failed to load i18n catalog %s: %s", path, exc)
         return {}
+    with _catalog_lock:
+        if len(_bundled_cache) >= _BUNDLED_CACHE_MAX:
+            _bundled_cache.clear()
+        _bundled_cache[key] = parsed
+    return dict(parsed)
 
 
 def _flatten_into(node: Any, prefix: str, out: dict[str, str]) -> None:
@@ -226,6 +242,7 @@ def reset_language_cache() -> None:
     with _catalog_lock:
         _catalog_cache.clear()
         _supported_cache.clear()
+        _bundled_cache.clear()
     i18n_layers.clear_cache()
 
 

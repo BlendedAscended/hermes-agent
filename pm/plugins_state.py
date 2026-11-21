@@ -5,6 +5,7 @@ Plugin admission owns writes; discovery never edits a profile's selection.
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from typing import Any, Optional
 import logging
@@ -33,7 +34,7 @@ def _selection_readers(config_path: Path):
     from hermes_cli import config_backend
 
     if os.environ.get(config_backend.BACKEND_ENV, "").strip().lower() in ("", "file"):
-        return config_backend.config_version, config_backend.read_config_doc
+        return config_backend.config_version, config_backend.read_config_doc_readonly
     from pm.package import InstallError
     from pm.runtime import is_runtime
     try:
@@ -41,9 +42,9 @@ def _selection_readers(config_path: Path):
     except InstallError:  # an application process whose packaged PM runtime is damaged: not PM's runtime
         in_runtime = False
     if not in_runtime:
-        return config_backend.config_version, config_backend.read_config_doc
+        return config_backend.config_version, config_backend.read_config_doc_readonly
     backend, home = config_backend.local_file_layer(config_path)
-    return (lambda _path: backend.version(home)), (lambda _path: backend.read_user_doc(home))
+    return (lambda _path: backend.version(home)), (lambda _path: backend.read_user_doc_readonly(home))
 
 
 def read_home_selection(home: Path) -> Optional[dict[str, Any]]:
@@ -89,7 +90,7 @@ def read_home_selection(home: Path) -> Optional[dict[str, Any]]:
     provider = (config.get("memory") or {}).get("provider")
     if provider is not None and not isinstance(provider, str):
         raise ValueError(f"memory.provider must be a name: {config_path}")
-    return config
+    return copy.deepcopy(config)
 
 
 def _enabled_from_config(config: dict[str, Any]) -> list[str]:

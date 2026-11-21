@@ -45,3 +45,12 @@ def test_callers_do_not_mutate_the_shared_cached_object(tmp_path, monkeypatch):
     assert secrets == {"onepassword": {"enabled": False}}
     assert cached == snapshot
     assert load_yaml_file_readonly(path) is cached
+
+
+def test_readonly_yaml_cache_separates_encodings(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("\ufeffvalue: ok\n", encoding="utf-8")
+
+    parsed = load_yaml_file_readonly(path, encoding="utf-8-sig")
+
+    assert parsed == {"value": "ok"}

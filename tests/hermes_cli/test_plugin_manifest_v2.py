@@ -107,6 +107,34 @@ class TestV2Parsing:
         # plugin still loads
         assert mgr._plugins["modern"].enabled or mgr._plugins["modern"].error
 
+    def test_manifest_document_cache_reuses_parse_but_rebuilds_manifest(self, tmp_path, monkeypatch):
+        from hermes_cli import plugins_manifest
+
+        plugin_dir = _write_plugin(tmp_path, "cached")
+        manifest_path = plugin_dir / "plugin.yaml"
+        original_load = plugins_manifest.fast_safe_load
+        loads = []
+
+        def count_load(stream):
+            loads.append(1)
+            return original_load(stream)
+
+        monkeypatch.setattr(plugins_manifest, "fast_safe_load", count_load)
+        first = plugins_manifest.parse_manifest_file(manifest_path, plugin_dir, "test", "")
+        second = plugins_manifest.parse_manifest_file(manifest_path, plugin_dir, "test", "")
+
+        assert first is not None and second is not None
+        assert first is not second
+        assert len(loads) == 1
+
+        manifest_path.write_text("name: cached\nversion: 0.2.0\n", encoding="utf-8")
+        import os
+        stat = manifest_path.stat()
+        os.utime(manifest_path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+        changed = plugins_manifest.parse_manifest_file(manifest_path, plugin_dir, "test", "")
+        assert changed is not None and changed.version == "0.2.0"
+        assert len(loads) == 2
+
     def test_unknown_field_in_v2_warns_but_loads(self, hermes_home, caplog):
         _write_plugin(
             hermes_home / "plugins", "modern",
