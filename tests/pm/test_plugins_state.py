@@ -201,15 +201,15 @@ def test_read_parses_config_once_per_home(homes, monkeypatch):
     _write_config(default_home, ["a-plug"])
     _write_config(profile_home, ["c-plug"])
 
-    import utils
+    import utils.files
 
     calls: list = []
-    real = utils.fast_safe_load
+    real = utils.files.fast_safe_load
 
     def counting(stream):
         calls.append(stream)
         return real(stream)
 
-    monkeypatch.setattr(utils, "fast_safe_load", counting)
+    monkeypatch.setattr(utils.files, "fast_safe_load", counting)
     pstate.enabled_plugins_ordered()
     assert len(calls) == 2  # one per home, not one per query

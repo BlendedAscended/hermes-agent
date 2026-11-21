@@ -29,6 +29,14 @@ from hermes_cli import kanban_db_dispatch as kbd
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _skip_external_install_manifest(monkeypatch):
+    """The worktree sits under a real Hermes home; its parent is not an install manifest."""
+    import pm.environments
+
+    monkeypatch.setattr(pm.environments, "_payload_manifest", lambda _root: None)
+
+
 @pytest.fixture
 def kanban_home(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
@@ -108,6 +116,44 @@ def test_create_task_with_model_and_provider(conn):
     ev = next(e for e in kb.list_events(conn, tid) if e.kind == "created")
     assert ev.payload["model_override"] == "qwen-max"
     assert ev.payload["provider_override"] == "openrouter"
+
+
+def test_owner_uses_profile_default_for_legacy_banned_pin(conn, kanban_home, tmp_path):
+    """A legacy row cannot route around the provider ban at owner-side execution."""
+    from gateway.session_contract import SessionActor
+    from gateway.session_kanban import build_kanban_policy
+
+    scripts = kanban_home / "scripts"
+    scripts.mkdir()
+    (scripts / "routing-policy.yaml").write_text(
+        "banned_providers: [deepseek]\n", encoding="utf-8")
+    profile = kanban_home / "profiles" / "elias"
+    profile.mkdir(parents=True)
+    (profile / "config.yaml").write_text("{}\n", encoding="utf-8")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    task_id = kb.create_task(conn, title="legacy", assignee="elias",
+                             workspace_kind="dir", workspace_path=str(workspace))
+    conn.execute(
+        "UPDATE tasks SET model_override='deepseek-flash', provider_override='deepseek' WHERE id=?",
+        (task_id,),
+    )
+    conn.commit()
+    task = kb.claim_task(conn, task_id)
+    assert task is not None
+    actor = SessionActor("owner", str(profile), frozenset({"session:create"}), "transport")
+    connection = SimpleNamespace(
+        authority=SimpleNamespace(profile_id=str(profile)), actor=actor, native_owner=True)
+
+    policy, _private = build_kanban_policy(
+        connection,
+        {"board": "default", "task_id": task.id, "run_id": task.current_run_id,
+         "claim_lock": task.claim_lock, "db": str(kb.kanban_db_path())},
+        {"model": {"default": "profile-model", "provider": "custom"}},
+    )
+
+    assert policy.model == "profile-model"
+    assert policy.provider == "custom"
 
 
 

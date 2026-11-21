@@ -35,9 +35,11 @@ def test_pm_runtime_reads_the_local_selection_without_the_plane(remote_home, mon
     assert plugins_state.read_home_selection(remote_home / "absent") is None
 
 
-def test_application_process_reads_the_selection_through_the_backend(remote_home):
+def test_application_process_reads_the_selection_through_the_backend(remote_home, monkeypatch):
     # Control: outside PM's runtime the selected (unconfigured) remote backend is consulted and
     # fails closed rather than serving the local file.
+    import pm.runtime
+    monkeypatch.setattr(pm.runtime, "is_runtime", lambda: False)
     from hermes_cli.config_backend import ConfigBackendUnavailable
     with pytest.raises(ConfigBackendUnavailable):
         plugins_state.read_home_selection(remote_home)

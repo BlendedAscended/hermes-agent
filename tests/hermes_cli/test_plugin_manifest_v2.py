@@ -354,6 +354,9 @@ class TestPythonDependenciesSeam:
     def test_missing_pip_dep_surfaced_with_hint_not_installed(
         self, hermes_home, caplog, monkeypatch
     ):
+        import pm.environments
+
+        monkeypatch.setattr(pm.environments, "_payload_manifest", lambda _root: None)
         calls = []
         import subprocess
 

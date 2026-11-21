@@ -1,6 +1,8 @@
 """Scheduled work waits for the next permitted local window without being lost."""
 
 import json
+import sys
+import types
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -95,9 +97,13 @@ def test_boundary_claim_preserves_the_pending_occurrence(window_store, monkeypat
 
 
 def test_scheduler_defers_housekeeping_and_queued_delivery(window_store, monkeypatch):
-    from cron import bot_chat_delivery, scheduler, scheduler_tick, store_health
+    from cron import scheduler, scheduler_tick, store_health
 
     calls = []
+    delivery = types.ModuleType("cron.bot_chat_delivery")
+    delivery.drain = lambda: calls.append("delivery")
+    delivery.drain_in_background = lambda: calls.append("delivery-background")
+    monkeypatch.setitem(sys.modules, "cron.bot_chat_delivery", delivery)
     now = datetime.fromisoformat("2026-11-16T20:10:00+00:00")
     monkeypatch.setattr(scheduler, "_hermes_now", lambda: now)
     monkeypatch.setattr(scheduler, "_should_yield_tick_to_fresh_gateway", lambda: None)
@@ -108,7 +114,6 @@ def test_scheduler_defers_housekeeping_and_queued_delivery(window_store, monkeyp
     monkeypatch.setattr(scheduler, "_sweep_mcp_orphans", lambda: None)
     monkeypatch.setattr(store_health, "recheck_idle", lambda: None)
     monkeypatch.setattr(scheduler, "get_due_jobs", list)
-    monkeypatch.setattr(bot_chat_delivery, "drain", lambda: calls.append("delivery"))
     monkeypatch.setattr(scheduler, "_maybe_run_worktree_maintenance", lambda: calls.append("maintenance"))
     assert scheduler_tick._tick_admitted(verbose=False) == 0
     assert calls == []

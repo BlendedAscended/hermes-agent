@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING
 from hermes_cli.quiet_single_query import KANBAN_WORKER_EXIT_TRAILER
 from hermes_cli._startup_fast import project_root_str
 from hermes_cli.kanban_db_heartbeat import heartbeat_worker
+from hermes_cli.kanban_runtime_policy import default_max_runtime_seconds
 from hermes_cli import kanban_task_continuity as _continuity
 
 if TYPE_CHECKING:

@@ -55,6 +55,7 @@ def _tick_failing(job, tmp_path, deliveries, error="boom unrelated", *, settle=F
     (tmp_path / "config.yaml").write_text(
         "platforms:\n  slack:\n    enabled: true\n    token: xoxb-test\n"
     )
+    import pm.environments
 
     def fake_deliver(execution_id, jb, content, **kwargs):
         deliveries.append(content)
@@ -67,6 +68,7 @@ def _tick_failing(job, tmp_path, deliveries, error="boom unrelated", *, settle=F
          patch("cron.scheduler_delivery._resolve_origin", return_value=None), \
          patch("hermes_cli.env_loader.load_hermes_dotenv"), \
          patch("hermes_cli.env_loader.reset_secret_source_cache"), \
+         patch.object(pm.environments, "_payload_manifest", return_value=None), \
          patch("tools.mcp_tool_discovery.discover_mcp_tools", return_value=[]), \
          patch("hermes_cli.runtime_provider.resolve_runtime_provider",
                return_value={

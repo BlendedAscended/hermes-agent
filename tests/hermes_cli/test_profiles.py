@@ -876,6 +876,9 @@ class TestListProfiles:
         from one background refresh per profile per recheck window (#114041). Control: the
         synchronous ``list_profiles()`` still walks and reports the fresh number."""
         import threading
+        import pm.environments
+
+        monkeypatch.setattr(pm.environments, "_payload_manifest", lambda _root: None)
         import tui_gateway.server as srv
 
         skills = profile_env / ".hermes" / "skills" / "cat"
@@ -1728,7 +1731,7 @@ class TestProfilesToServe:
 
     @pytest.mark.parametrize("failure_at", ["stat", "read", "decode"])
     def test_standalone_io_failure_is_bounded_and_recovers(self, profile_env, monkeypatch, caplog, failure_at):
-        from hermes_cli import config
+        from hermes_cli import config_backend
 
         create_profile("solo", no_alias=True)
         home = get_profile_dir("solo")
@@ -1750,7 +1753,7 @@ class TestProfilesToServe:
             if failure_at == "stat":
                 m.setattr(Path, "stat", denied)
             else:
-                m.setattr(config, "read_user_config_raw", unreadable)
+                m.setattr(config_backend, "read_config_doc_readonly", unreadable)
             assert profiles.profile_is_standalone(home) is False
             assert profiles.profile_is_standalone(home) is False
         assert len([r for r in caplog.records if "Cannot read gateway.standalone" in r.message]) == 1

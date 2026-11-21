@@ -94,6 +94,7 @@ def fast_forward_missed_recurring(d: Any, grace: int) -> bool:
     missed = count_missed_slots(d.schedule, d.next_run, d.scan.now, timezone=d.job)
     capped = missed >= _MAX_COUNTED_SLOTS
     if (_instant_after(_ensure_aware(datetime.fromisoformat(new_next)), d.scan.now)
+            and d.job.get("window_deferred_slot") != d.next_run
             and not job_catches_up(d.job)):
         logger.info(
             "Job '%s' missed its scheduled time (%s, grace=%ds). "
@@ -129,6 +130,8 @@ def retire_expired_oneshot(d: Any) -> bool:
     from cron.dispatch_hold import grace_starts_at
     from cron.jobs_oneshot_diagnostics import write_missed
 
+    if d.job.get("window_deferred_slot") == d.next_run:
+        return False
     if _elapsed_seconds(d.scan.now, d.next_run_dt) <= ONESHOT_GRACE_SECONDS:
         return False
     # Due while a gateway drain held dispatch: its grace counts from the end of the hold. A claimed

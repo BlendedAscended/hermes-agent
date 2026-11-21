@@ -50,7 +50,19 @@ def build_kanban_policy(connection, params, config):
         raise AuthorityRefusal('invalid_kanban_claim') from exc
     cwd = task.workspace_path
     params_policy = {'source': 'cli', 'cwd': cwd}
-    for name, value in (('model', task.model_override), ('provider', task.provider_override), ('reasoning', task.reasoning_effort)):
+    model_override, provider_override = task.model_override, task.provider_override
+    if model_override:
+        from hermes_cli.kanban_provider_policy import banned_pin
+
+        banned = banned_pin(model_override, provider_override)
+        if banned:
+            kb._log.warning(
+                "INCIDENT kanban: task %s pins model %r on banned provider %r; "
+                "using the profile default instead",
+                task.id, model_override, banned,
+            )
+            model_override = provider_override = None
+    for name, value in (('model', model_override), ('provider', provider_override), ('reasoning', task.reasoning_effort)):
         if value:
             params_policy[name] = value
     private = {}

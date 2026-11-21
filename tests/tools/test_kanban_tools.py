@@ -856,9 +856,13 @@ def test_create_explicit_scratch_ignores_ambient_board_project(
     kb.write_board_metadata("default", project_id=project_id)
     kb.create_board("target", name="Target", project_id=project_id if target_scoped else "")
 
+    created = 0
+
     def create(**extra):
+        nonlocal created
+        created += 1
         result = json.loads(kt._handle_create(
-            {"board": "target", "title": "card", "assignee": "peer", **extra}))
+            {"board": "target", "title": f"card-{created}", "assignee": "peer", **extra}))
         assert result["ok"] is True
         return result["workspace_kind"], result["project_id"]
 

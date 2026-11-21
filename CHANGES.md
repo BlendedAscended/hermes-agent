@@ -1,3 +1,18 @@
+## 2026-11-21 01:10 (UTC) — Reconcile fleet patches with v0.23.3 runtime paths
+
+**Changes:**
+- Keep v0.23.3 missed-run policy and route policy while applying deferred operating-window recovery and owner-side banned provider fallback; repair worker context delegation and dispatch import.
+- Update the regression tests for scheduler imports, dedupe keys, PM manifest isolation, and the upstream owner-side worker protocol.
+- Files: cron/missed_runs.py, gateway/session_kanban.py, hermes_cli/_early_recovery.py, hermes_cli/kanban_db.py, hermes_cli/kanban_db_dispatch.py, tests/cron/, tests/hermes_cli/, tests/plugins/, tests/pm/, tests/tools/.
+- No schema migration or client change.
+
+## 2026-11-21 00:51 (UTC) — fix(update): respect parked branch opt-out on release tags
+
+**Changes:**
+- Preserve the parked branch when updates.auto_switch_parked_branch is false, including stable release tags.
+- Files: hermes_cli/update_cmd.py, tests/hermes_cli/test_update_detached_rescue_ref.py.
+- No migration or client changes.
+
 ## 2026-11-17 03:46 (UTC) — Fence scheduled housekeeping and boundary claims
 
 **Changes:**

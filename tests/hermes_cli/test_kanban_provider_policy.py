@@ -87,19 +87,19 @@ def test_dispatch_strips_a_legacy_banned_pin(kanban_home):
                      "WHERE id=?", (tid,))
         conn.commit()
         argv = kbd._worker_argv(kb.get_task(conn, tid), "backend", str(kanban_home))
-    tail = argv[argv.index("hermes_cli.main") + 1:]
-    assert "deepseek" not in " ".join(tail)
-    assert "-m" not in tail and "--provider" not in tail
+    # v0.23.3 workers submit claims to the profile owner; the child argv never carries task routing.
+    assert argv[-2:] == ["-m", "hermes_cli.kanban_worker_client"]
 
 
 def test_dispatch_keeps_an_approved_pin(kanban_home):
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="ok", assignee="backend",
                              model_override="z-ai/glm-5.3-flash", provider_override="openrouter")
-        argv = kbd._worker_argv(kb.get_task(conn, tid), "backend", str(kanban_home))
-    tail = argv[argv.index("hermes_cli.main") + 1:]
-    assert tail[tail.index("-m") + 1] == "z-ai/glm-5.3-flash"
-    assert tail[tail.index("--provider") + 1] == "openrouter"
+        task = kb.get_task(conn, tid)
+        argv = kbd._worker_argv(task, "backend", str(kanban_home))
+    assert task.model_override == "z-ai/glm-5.3-flash"
+    assert task.provider_override == "openrouter"
+    assert argv[-2:] == ["-m", "hermes_cli.kanban_worker_client"]
 
 
 # --- duplicate landing cards -------------------------------------------------
