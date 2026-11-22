@@ -294,6 +294,10 @@ def accept_outcome(conn: sqlite3.Connection, task_id: str, run_id: int, token: s
         raise OutcomeReceiptError("a conflicting outcome receipt already owns this task run")
     _verify_evidence(receipt)
     _verify_owner(conn, task_id, run_id, receipt.get("tenant"), token)
+    # Store the canonical spelling: a task with `tenant IS NULL` must land a NULL
+    # column, not the string "null"/"None" a model may serialize, so the receipt
+    # stays reconcilable through the same normalized comparison _verify_owner uses.
+    tenant = _norm_tenant(receipt.get("tenant"))
     with kb.write_txn(conn):
         previous = conn.execute(
             "SELECT id,idempotency_key,payload_json,state FROM task_outcome_receipts "
@@ -307,15 +311,15 @@ def accept_outcome(conn: sqlite3.Connection, task_id: str, run_id: int, token: s
         cur = conn.execute(
             "INSERT INTO task_outcome_receipts(task_id,run_id,tenant,owner_token,input_digest,"
             "idempotency_key,disposition,payload_json,state,accepted_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (task_id, int(run_id), receipt.get("tenant"), token, input_digest, idempotency_key,
+            (task_id, int(run_id), tenant, token, input_digest, idempotency_key,
              receipt["disposition"], raw, "accepted", int(time.time())),
         )
         checkpoint = {"version": 1, "task_id": task_id, "run_id": int(run_id),
-            "tenant": receipt.get("tenant"), "completed_steps": receipt.get("completed_steps", []),
+            "tenant": tenant, "completed_steps": receipt.get("completed_steps", []),
             "evidence": receipt["evidence"], "next_action": "reconcile_accepted_outcome",
             "pending_dependency": None, "waiting_reason": None, "recovery_owner": "kanban_dispatcher",
             "recovery_trigger": "next_dispatch_tick", "last_error": None}
-        _checkpoint(conn, task_id, run_id, receipt.get("tenant"), token, checkpoint)
+        _checkpoint(conn, task_id, run_id, tenant, token, checkpoint)
         kb._append_event(conn, task_id, "outcome_accepted", {"receipt_id": cur.lastrowid,
             "idempotency_key": idempotency_key, "disposition": receipt["disposition"]}, run_id=run_id)
         return int(cur.lastrowid), False
@@ -331,7 +335,13 @@ def reconcile_receipt(conn: sqlite3.Connection, receipt_id: int) -> bool:
     payload = json.loads(row["payload_json"])
     disposition = row["disposition"]
     target = "done" if disposition == "complete" else "review"
-    if task is None or task.tenant != row["tenant"] or task_input_digest(conn, task.id) != row["input_digest"]:
+    # Normalize both sides exactly as _verify_owner does: a task with `tenant IS
+    # NULL` may have been accepted with a string spelling of null ("null"/"None")
+    # stored in the column, and comparing raw would strand the finished work in
+    # `running` forever (reconcile_receipt is also the dispatcher's repair hook).
+    if (task is None
+            or _norm_tenant(task.tenant) != _norm_tenant(row["tenant"])
+            or task_input_digest(conn, task.id) != row["input_digest"]):
         return False
     if task.status == target:
         with kb.write_txn(conn):

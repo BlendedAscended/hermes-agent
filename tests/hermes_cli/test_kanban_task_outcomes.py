@@ -15,6 +15,7 @@ from hermes_cli.kanban_task_continuity import (
     accept_and_reconcile,
     latest_checkpoint,
     reconcile_pending_outcomes,
+    reconcile_receipt,
     task_input_digest,
 )
 
@@ -153,3 +154,53 @@ def test_authorized_dispatcher_consumes_prior_receipt_after_successor_claim(cont
     assert reconcile_pending_outcomes(conn) == [receipt_id]
     assert kb.get_task(conn, task_id).status == "done"
     assert kb.complete_task(conn, task_id, summary="stale owner", expected_run_id=predecessor.current_run_id) is False
+
+
+def test_string_null_tenant_reconciles_a_null_tenant_task(continuity_board, tmp_path):
+    conn = continuity_board
+    task_id = kb.create_task(conn, title="Null tenant accepts a string spelling", assignee="default", tenant=None)
+    claimed = kb.claim_task(conn, task_id, claimer="fixture-host:null-tenant")
+    assert claimed and claimed.current_run_id
+    token, receipt, handoff, _ = _proof(tmp_path, conn, claimed, claimed.current_run_id, tenant="null")
+    receipt_id, _ = accept_outcome(conn, task_id, claimed.current_run_id, token, receipt, handoff)
+    # Force the exact stranded state: a receipt whose empty tenant was serialized
+    # as the TEXT 'null'. Ending up here is what previously wedged the dispatcher,
+    # so this asserts the reconcile-side normalization independent of write time.
+    with kb.write_txn(conn):
+        conn.execute("UPDATE task_outcome_receipts SET tenant='null' WHERE id=?", (receipt_id,))
+        conn.execute("UPDATE task_checkpoints SET tenant='null' WHERE task_id=?", (task_id,))
+
+    assert reconcile_pending_outcomes(conn) == [receipt_id]
+    assert kb.get_task(conn, task_id).status == "done"
+    row = conn.execute("SELECT state,reconciled_at FROM task_outcome_receipts WHERE id=?", (receipt_id,)).fetchone()
+    assert row["state"] == "reconciled" and row["reconciled_at"]
+
+
+def test_accept_outcome_stores_canonical_null_tenant(continuity_board, tmp_path):
+    conn = continuity_board
+    task_id = kb.create_task(conn, title="Store canonical tenant spelling", assignee="default", tenant=None)
+    claimed = kb.claim_task(conn, task_id, claimer="fixture-host:canonical")
+    token, receipt, handoff, _ = _proof(tmp_path, conn, claimed, claimed.current_run_id, tenant="null")
+    receipt_id, _ = accept_outcome(conn, task_id, claimed.current_run_id, token, receipt, handoff)
+    row = conn.execute("SELECT tenant,state FROM task_outcome_receipts WHERE id=?", (receipt_id,)).fetchone()
+    assert row["tenant"] is None
+    assert row["state"] == "accepted"
+    checkpoint = latest_checkpoint(conn, task_id)
+    assert checkpoint["tenant"] is None
+
+
+def test_genuinely_different_tenant_still_refuses_reconcile(continuity_board, tmp_path):
+    conn = continuity_board
+    task_id = kb.create_task(conn, title="Foreign tenant stays unreconciled", assignee="default", tenant="acct-a")
+    claimed = kb.claim_task(conn, task_id, claimer="fixture-host:foreign")
+    token, receipt, handoff, _ = _proof(tmp_path, conn, claimed, claimed.current_run_id, tenant="acct-a")
+    receipt_id, _ = accept_outcome(conn, task_id, claimed.current_run_id, token, receipt, handoff)
+
+    # A receipt that genuinely belongs to a different tenant must never reconcile,
+    # even though the string-null normalization now widens the empty-tenant case.
+    with kb.write_txn(conn):
+        conn.execute("UPDATE task_outcome_receipts SET tenant='acct-b' WHERE id=?", (receipt_id,))
+
+    assert reconcile_receipt(conn, receipt_id) is False
+    assert reconcile_pending_outcomes(conn) == []
+    assert kb.get_task(conn, task_id).status == "running"
