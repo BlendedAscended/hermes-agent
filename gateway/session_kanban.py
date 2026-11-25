@@ -14,7 +14,6 @@ from persistence.core.errors import AuthorityRefusal
 def build_kanban_policy(connection, params, config):
     from hermes_cli import kanban_db as kb
     from hermes_cli.profiles import resolve_profile_env
-    from gateway.session_policy import build_policy
     authority, actor = connection.authority, connection.actor
     if not connection.native_owner or 'session:create' not in actor.capabilities:
         raise AuthorityRefusal('permission_denied')
@@ -49,27 +48,8 @@ def build_kanban_policy(connection, params, config):
     except (ValueError, OSError, sqlite3.Error) as exc:
         raise AuthorityRefusal('invalid_kanban_claim') from exc
     cwd = task.workspace_path
-    params_policy = {'source': 'cli', 'cwd': cwd}
-    model_override, provider_override = task.model_override, task.provider_override
-    if model_override:
-        from hermes_cli.kanban_provider_policy import banned_pin
-
-        banned = banned_pin(model_override, provider_override)
-        if banned:
-            kb._log.warning(
-                "INCIDENT kanban: task %s pins model %r on banned provider %r; "
-                "using the profile default instead",
-                task.id, model_override, banned,
-            )
-            model_override = provider_override = None
-    for name, value in (('model', model_override), ('provider', provider_override), ('reasoning', task.reasoning_effort)):
-        if value:
-            params_policy[name] = value
     private = {}
-    policy = build_policy(params_policy, config, private_secrets=private)
-    if policy.model is None:
-        from gateway.run import _resolve_gateway_model
-        policy = replace(policy, model=_resolve_gateway_model(policy.config()))
+    policy = kanban_launch_policy(task, cwd, config, private)
     context = dict(params, workspace=cwd, branch=task.branch_name, tenant=task.tenant,
         profile=task.assignee, workspaces_root=str(kb.workspaces_root(board=board).resolve()),
         skills=skills, goal_mode=task.goal_mode, goal_max_turns=task.goal_max_turns,
@@ -80,6 +60,48 @@ def build_kanban_policy(connection, params, config):
     request.update(source='kanban', board=board, task_id=task.id, run_id=task.current_run_id)
     return replace(policy, source='kanban', platform='cli', toolsets=tuple(sorted(set(policy.toolsets) | {'kanban'})),
                    request_json=json.dumps(request, sort_keys=True), kanban_json=json.dumps(context)), private
+
+
+def kanban_launch_policy(task, cwd, config, private=None):
+    """The launch policy a claimed card runs, its model resolved by ``task_model`` (shared with the
+    dispatcher's pre-spawn refusal). Refuses ``invalid_params`` (field ``model``) only when nothing
+    can name one, before a receipt or a worker exists."""
+    from gateway.session_policy import build_policy
+    from hermes_cli.kanban_worker_preflight import missing_model_detail, task_model
+    params = {'source': 'cli', 'cwd': cwd}
+    model_override, provider_override = task.model_override, task.provider_override
+    stripped_banned_pin = False
+    if model_override:
+        # A legacy row can pin a provider the fleet has since banned. The dispatcher strips
+        # that pin before spawn; the owner path runs the card directly, so it needs the same
+        # rule here or a stale row routes around the ban.
+        from hermes_cli import kanban_db as kb
+        from hermes_cli.kanban_provider_policy import banned_pin
+
+        banned = banned_pin(model_override, provider_override)
+        if banned:
+            kb._log.warning(
+                "INCIDENT kanban: task %s pins model %r on banned provider %r; "
+                "using the profile default instead",
+                task.id, model_override, banned,
+            )
+            model_override = provider_override = None
+            stripped_banned_pin = True
+    for name, value in (('model', model_override), ('provider', provider_override), ('reasoning', task.reasoning_effort)):
+        if value:
+            params[name] = value
+    policy = build_policy(params, config, private_secrets={} if private is None else private)
+    if policy.model is None:
+        if stripped_banned_pin:
+            # Resolve from the profile config, not the card: task_model reads model_override
+            # first and would put the banned pin straight back.
+            task = replace(task, model_override=None, provider_override=None)
+        model, unresolved = task_model(task, config)
+        if unresolved:
+            from hermes_constants import get_hermes_home
+            raise AuthorityRefusal('invalid_params', field='model', detail=missing_model_detail(task.assignee, get_hermes_home()))
+        policy = replace(policy, model=model)
+    return policy
 
 
 async def run_task(connection, params):
