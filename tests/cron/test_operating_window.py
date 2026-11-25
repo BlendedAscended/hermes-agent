@@ -2,7 +2,6 @@
 
 import json
 import sys
-import types
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -100,10 +99,9 @@ def test_scheduler_defers_housekeeping_and_queued_delivery(window_store, monkeyp
     from cron import scheduler, scheduler_tick, store_health
 
     calls = []
-    delivery = types.ModuleType("cron.bot_chat_delivery")
-    delivery.drain = lambda: calls.append("delivery")
-    delivery.drain_in_background = lambda: calls.append("delivery-background")
-    monkeypatch.setitem(sys.modules, "cron.bot_chat_delivery", delivery)
+    # No fake cron.bot_chat_delivery module: the tick must run against the real cron package
+    # (a stubbed retired module hid an in-window ModuleNotFoundError, t_dd5ef97f).
+    monkeypatch.delitem(sys.modules, "cron.bot_chat_delivery", raising=False)
     now = datetime.fromisoformat("2026-11-16T20:10:00+00:00")
     monkeypatch.setattr(scheduler, "_hermes_now", lambda: now)
     monkeypatch.setattr(scheduler, "_should_yield_tick_to_fresh_gateway", lambda: None)
@@ -119,7 +117,8 @@ def test_scheduler_defers_housekeeping_and_queued_delivery(window_store, monkeyp
     assert calls == []
     now = datetime.fromisoformat("2026-11-16T21:00:00+00:00")
     assert scheduler_tick._tick_admitted(verbose=False) == 0
-    assert calls == ["delivery", "maintenance"]
+    assert calls == ["maintenance"]
+    assert "cron.bot_chat_delivery" not in sys.modules
 
 
 def test_one_shot_recovers_if_host_slept_through_the_closed_window(window_store, monkeypatch):

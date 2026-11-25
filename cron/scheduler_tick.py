@@ -134,12 +134,9 @@ def _tick_admitted(
         from cron.operating_window import scheduled_dispatch_allowed
         window_open = scheduled_dispatch_allowed(_sched._hermes_now())
         _pre_dispatch_housekeeping(_sched, headless, window_open=window_open)
-        if window_open:
-            from cron.bot_chat_delivery import drain, drain_in_background
-            if sync:
-                drain()
-            else:
-                drain_in_background()
+        # No queued Bot Chat delivery drain here: that lane (cron.bot_chat_delivery) was retired in
+        # 1cc9cb9199; its leftover records are drained by bot_chat_legacy in the housekeeping above.
+        # Importing the retired module crashed every in-window tick (t_dd5ef97f).
         # Periodic worktree GC (6h, threaded) — the only sweep gateway-only boxes get.
         if window_open:
             try:

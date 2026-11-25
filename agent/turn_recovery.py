@@ -1954,6 +1954,19 @@ def route_classified_error(
         pool_may_recover = (
             False if _is_upstream else _ra()._pool_may_recover_from_rate_limit(agent._credential_pool)
         )
+        # A provider Retry-After longer than a person waits (a subscription seat's 5h window
+        # answers 429 with retry-after 600+) is a plan cap, not a blip: pool rotation already
+        # had its chance inside the request, so sleeping out the cap on the same seat strands
+        # the turn. Move to the next fallback lane (other subscription seats, metered last).
+        if pool_may_recover:
+            from agent.retry_utils import LIVE_RETRY_WAIT_CAP_S, provider_retry_after_seconds
+            _ra_secs = provider_retry_after_seconds(api_error)
+            if _ra_secs is not None and _ra_secs > LIVE_RETRY_WAIT_CAP_S:
+                logger.info(
+                    "Rate limit Retry-After %.0fs > %.0fs on a multi-credential pool: falling back "
+                    "instead of waiting on rotation", _ra_secs, LIVE_RETRY_WAIT_CAP_S,
+                )
+                pool_may_recover = False
         if not pool_may_recover:
             agent._buffer_diagnostic_status(_eager_fallback_status(classified, _is_upstream, _is_transport_failure))
             reset_at = error_context.get("reset_at") if isinstance(error_context, dict) else None
