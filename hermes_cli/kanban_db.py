@@ -1258,6 +1258,32 @@ def create_task(
         if row:
             return row["id"]
 
+    # Coverage ledger pre-creation dedup/cap gate (P5: Grok Bot Bridge)
+    if (
+        initial_status not in ("done", "archived")
+        and os.environ.get("HERMES_SKIP_COVERAGE_LEDGER_CHECK") != "1"
+    ):
+        _skills_blob = " ".join(skills_list or []).lower()
+        _meta_blob = f"{title}\n{body or ''}\n{assignee or ''}\n{_skills_blob}".lower()
+        if "grok-bot" in _meta_blob or "execution:grok-bot" in _meta_blob:
+            _sf_root = Path.home() / "social_factory"
+            if (_sf_root / "coverage_ledger_bridge.py").exists():
+                import sys as _sys
+                if str(_sf_root) not in _sys.path:
+                    _sys.path.insert(0, str(_sf_root))
+                import coverage_ledger_bridge as _cl_bridge  # type: ignore
+
+                _ledger_root_env = os.environ.get("VELDON_COVERAGE_LEDGER_ROOT", "").strip()
+                _cl_res = _cl_bridge.check_kanban_card_against_ledger(
+                    title=title,
+                    body=body or "",
+                    ledger_root=Path(_ledger_root_env) if _ledger_root_env else None,
+                )
+                if _cl_res.get("blocked"):
+                    raise ValueError(
+                        f"Coverage ledger blocked duplicate/capped grok-bot card ({_cl_res.get('reason')}): {_cl_res.get('matches')}"
+                    )
+
     now = int(time.time())
 
     # Only persistent kinds inherit the board ``default_workdir``: a scratch
