@@ -3147,6 +3147,20 @@ def edit_task(
     return True
 
 
+# Kinds a human holds a card on. A typed blocked card may be re-typed in place only
+# toward one of these, never back to ``transient`` and never to ``dependency``.
+HUMAN_HOLD_BLOCK_KINDS = frozenset({"needs_input", "capability"})
+
+
+def _block_retype_allowed(stored_kind: Optional[str], new_kind: Optional[str]) -> bool:
+    """True when a card blocked as *stored_kind* may be re-typed to *new_kind* in place."""
+    return (
+        new_kind in HUMAN_HOLD_BLOCK_KINDS
+        and stored_kind in (HUMAN_HOLD_BLOCK_KINDS | {"transient"})
+        and new_kind != stored_kind
+    )
+
+
 def block_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None,
     kind: Optional[str] = None, expected_run_id: Optional[int] = None,
@@ -3162,8 +3176,17 @@ def block_task(
     (``block_kind IS NULL``, no live run) is classified in place when *kind*
     is supplied: ``block_kind``/``block_recurrences`` are set and a ``blocked``
     audit event is appended, while status, failure evidence and the terminal
-    runs stay exactly as the breaker left them. A typed block, a card with a
-    live run, or a kind-less call on a blocked card are still refused.
+    runs stay exactly as the breaker left them.
+
+    A TYPED blocked card is re-typed in place only toward a human hold:
+    ``transient`` -> ``needs_input``/``capability``, or between those two. The
+    status stays ``blocked``, ``block_recurrences`` resets to 1 and a ``blocked``
+    event records ``retyped_in_place`` with the previous kind. Unblocking first
+    to re-block handed the card back to the pool for a dispatcher tick and
+    tripped the loop breaker, so a human hold over a transient block landed in
+    ``triage``. A card with a live run, a caller asserting run ownership, a
+    kind-less call, the same kind, and any move toward ``transient`` or
+    ``dependency`` are still refused.
     """
     if kind is not None and kind not in VALID_BLOCK_KINDS:
         raise ValueError(f"block kind must be one of {sorted(VALID_BLOCK_KINDS)} or None")
@@ -3181,18 +3204,34 @@ def block_task(
         # asserting run ownership (``expected_run_id``) cannot own a parked
         # card -- its run is over -- so it is refused like any stale worker.
         if cur_row["status"] == "blocked":
-            if kind is None or expected_run_id is not None or _row_get(cur_row, "block_kind") is not None:
+            stored_kind = _row_get(cur_row, "block_kind")
+            if kind is None or expected_run_id is not None:
                 return False
-            classified = conn.execute(
+            if stored_kind is None:
+                classified = conn.execute(
+                    "UPDATE tasks SET block_kind = ?, block_recurrences = 1 "
+                    "WHERE id = ? AND status = 'blocked' AND block_kind IS NULL "
+                    "AND current_run_id IS NULL",
+                    (kind, task_id),
+                ).rowcount
+                if classified != 1:
+                    return False
+                _append_event(conn, task_id, "blocked", {
+                    "kind": kind, "reason": reason, "classified_in_place": True,
+                })
+                return True
+            if not _block_retype_allowed(stored_kind, kind):
+                return False
+            retyped = conn.execute(
                 "UPDATE tasks SET block_kind = ?, block_recurrences = 1 "
-                "WHERE id = ? AND status = 'blocked' AND block_kind IS NULL "
+                "WHERE id = ? AND status = 'blocked' AND block_kind = ? "
                 "AND current_run_id IS NULL",
-                (kind, task_id),
+                (kind, task_id, stored_kind),
             ).rowcount
-            if classified != 1:
+            if retyped != 1:
                 return False
             _append_event(conn, task_id, "blocked", {
-                "kind": kind, "reason": reason, "classified_in_place": True,
+                "kind": kind, "reason": reason, "retyped_in_place": True, "previous_kind": stored_kind,
             })
             return True
         source_status = _retry_status_for_run(conn, task_id) if cur_row["status"] == "running" else "ready"

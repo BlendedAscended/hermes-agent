@@ -1003,7 +1003,20 @@ def _cmd_block(args: argparse.Namespace) -> int:
 
         op = _commented(conn, reason, author, "BLOCKED", lambda tid: kb.block_task(
             conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id_for(tid)))
-        return _bulk_apply(ids, op, ok_msg, lambda tid: f"cannot block {tid}")
+        return _bulk_apply(ids, op, ok_msg, lambda tid: _block_refusal(conn, tid))
+
+
+def _block_refusal(conn, tid: str) -> str:
+    """Say why a block was refused, so the caller knows the next command to run."""
+    task = kb.get_task(conn, tid)
+    if task is None:
+        return f"cannot block {tid}: no such task"
+    if task.status == "blocked":
+        held = task.block_kind or "untyped"
+        return (f"cannot block {tid}: already blocked as {held}. A blocked card moves only from "
+                f"transient to needs_input or capability, or between those two; add context with "
+                f"`hermes kanban comment {tid} ...`")
+    return f"cannot block {tid}: status is {task.status}"
 
 
 def _cmd_schedule(args: argparse.Namespace) -> int:
